@@ -257,7 +257,7 @@ impl App {
                 self.page = "Survey".into();
             }
         }
-        if ui.button("Reset layout").on_hover_text("Put this page's panes back where its layout has them").clicked() {
+        if ui.button("Reset layout").on_hover_text("Put the panes back where this layout had them").clicked() {
             let page = self.page.clone();
             self.load_page(if workspace::PRESETS.contains(&page.as_str()) || self.workspaces.named.contains_key(&page) {
                 &page

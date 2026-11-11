@@ -187,7 +187,7 @@ fn a_record_with_nothing_left_to_play_is_refused_with_the_reason() {
     let r = burst(&e, false);
     e.remove_source(src.id());
     let err = e.play(PlayTarget::Record(r.id), Some(AudioMode::Am), 1.0, PlayTo::Speaker).unwrap_err();
-    assert!(err.contains("its source is gone") && err.contains("no slice"), "{err}");
+    assert!(err.contains("its receiver is closed") && err.contains("no IQ recording"), "{err}");
     assert!(e.audio_view().plays.is_empty(), "a refused play shows as a play");
     let err = e.play(PlayTarget::Record(api::RecordId(999_999)), None, 1.0, PlayTo::Speaker).unwrap_err();
     assert!(err.contains("not in memory"), "{err}");

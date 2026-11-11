@@ -107,7 +107,7 @@ fn snapshots_arrive_at_twenty_hertz_with_contiguous_rows() {
     let r = h.latest().receivers.iter().find(|r| r.id == id).cloned().unwrap();
     assert_eq!(r.letter, 'A');
     assert_eq!(r.status.health, Health::Ok);
-    assert!(r.status.text.starts_with("Live at 855.250 MHz, 10 MS/s: holding "), "{}", r.status.text);
+    assert!(r.status.text.starts_with("Live at 855.250 MHz, 10 MS/s · "), "{}", r.status.text);
     assert!(r.rows.len() <= 48);
 }
 
@@ -131,7 +131,8 @@ fn a_tune_is_acknowledged_and_shows_in_the_snapshot_and_the_log() {
     let a = ack(&h, seq);
     assert!(a.result.is_err(), "{a:?}");
     assert_eq!(h.latest().receivers[0].center_hz, 851.25e6);
-    assert!(h.latest().log.iter().any(|l| l.text.starts_with(&format!("command {seq} failed: "))));
+    let err = a.result.unwrap_err();
+    assert!(h.latest().log.iter().any(|l| l.kind == api::LogKind::Error && l.text == err), "{err}");
 }
 
 #[test]
@@ -153,7 +154,7 @@ fn closing_frees_the_letter_and_opening_twice_is_refused() {
     let h = spawn_sim();
     let open = || h.send(Command::Open { backend: "sim".into(), serial: "SIM-0001".into() });
     let Ok(Outcome::Opened(a)) = ack(&h, open()).result else { panic!() };
-    assert_eq!(ack(&h, open()).result, Err("already open as A".to_string()));
+    assert_eq!(ack(&h, open()).result, Err("Already open as A".to_string()));
     let seq = h.send(Command::Close(a));
     assert!(matches!(ack(&h, seq).result, Ok(Outcome::Done)));
     let s = wait_for(&h, Duration::from_millis(500), |s| s.receivers.is_empty());

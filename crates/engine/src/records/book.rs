@@ -228,15 +228,15 @@ impl RecordBook {
     /// Save IQ (see [`Recorder::save`]): the saved stem and whether the copy is still to come; the record is tagged
     /// `saved`. `Err` says why there is no IQ to keep.
     pub fn save_iq(&self, record: RecordId) -> Result<(PathBuf, bool), String> {
-        let r = self.recorder.get().ok_or_else(|| format!("record {} has no IQ to save: slices are off", record.0))?;
+        let r = self.recorder.get().ok_or_else(|| format!("Transmission #{} has no IQ to save: IQ recording is off", record.0))?;
         let saved = r.save(record).map_err(|e| {
             let why = match self.get(record) {
-                _ if e.kind() != std::io::ErrorKind::NotFound => format!("copying its slice failed: {e}"),
-                Some(rec) if rec.slice_evicted => "its slice was evicted to keep under the disk cap".into(),
-                Some(_) => "it has no slice".into(),
-                None => "its slice is gone".into(),
+                _ if e.kind() != std::io::ErrorKind::NotFound => format!("copying it failed: {e}"),
+                Some(rec) if rec.slice_evicted => "its IQ recording was deleted to free disk space".into(),
+                Some(_) => "it has no IQ recording".into(),
+                None => "its IQ recording is gone".into(),
             };
-            format!("record {} has no IQ to save: {why}", record.0)
+            format!("Transmission #{} has no IQ to save: {why}", record.0)
         })?;
         self.tag(record, "saved", true);
         Ok(saved)

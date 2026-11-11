@@ -94,7 +94,7 @@ impl StatusBar {
             add(
                 Level::Caution,
                 None,
-                format!("The classifier's queue was full: {} dropped without a look.", api::fmt::count(n as usize, "record")),
+                format!("Identification fell behind: {} skipped.", api::fmt::count(n as usize, "transmission")),
                 Some("Close a receiver, or wait for a quieter band."),
             );
         }
@@ -102,29 +102,29 @@ impl StatusBar {
             add(
                 Level::Caution,
                 None,
-                format!("{} left the ring before their look.", api::fmt::count(n as usize, "record")),
-                Some("Raise the guaranteed seconds in Devices."),
+                format!("{} skipped: their samples were gone from the buffer.", api::fmt::count(n as usize, "transmission")),
+                Some("Raise \"Keep at least\" under Sample buffer in Devices."),
             );
         }
         if snap.bus.saturated {
-            add(Level::Caution, None, "The bus is saturated: channels may be shed.".into(), Some("Close a receiver."));
+            add(Level::Caution, None, "Processing is overloaded: some channels may be dropped.".into(), Some("Close a receiver."));
         }
         if snap.bus.panicked_total > 0 {
             add(
                 Level::Alarm,
                 None,
-                format!("{} panicked and stopped.", api::fmt::count(snap.bus.panicked_total as usize, "channel consumer")),
+                format!("{} crashed.", api::fmt::count(snap.bus.panicked_total as usize, "processing task")),
                 Some("This is a bug: the Log has the details."),
             );
         }
         if let Some(s) = &snap.store {
             if let Some(e) = &s.error {
-                add(Level::Alarm, None, format!("The record store failed: {e}."), Some("Records are not being kept; check the disk."));
+                add(Level::Alarm, None, format!("History is not being saved: {e}."), Some("Check the disk."));
             } else if let Some(n) = self.rose("store dropped", s.dropped, now) {
                 add(
                     Level::Caution,
                     None,
-                    format!("The record store fell behind: {} not written.", api::fmt::count(n as usize, "change")),
+                    format!("History fell behind: {} lost.", api::fmt::count(n as usize, "update")),
                     Some("Check the disk is not full or slow."),
                 );
             }
@@ -150,7 +150,7 @@ impl StatusBar {
             match conditions.first() {
                 None => {
                     let rx = api::fmt::count(snap.receivers.len(), "receiver");
-                    ui.label(RichText::new(format!("{rx} running, nothing needs attention.")).color(theme::INK2));
+                    ui.label(RichText::new(format!("{rx} running.")).color(theme::INK2));
                 }
                 Some(c) => {
                     sentence(ui, c);
@@ -238,12 +238,12 @@ mod tests {
         let c = bar.conditions(&snap, t0 + Duration::from_secs(1));
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].level, Level::Caution);
-        assert_eq!(c[0].text, "The classifier's queue was full: 3 records dropped without a look.");
+        assert_eq!(c[0].text, "Identification fell behind: 3 transmissions skipped.");
         assert!(c[0].fix.is_some(), "every condition says what to change");
         // Rising again inside the hold counts from the first rise.
         snap.classify.dropped = 10;
         let c = bar.conditions(&snap, t0 + Duration::from_secs(10));
-        assert!(c[0].text.contains("5 records"), "{}", c[0].text);
+        assert!(c[0].text.contains("5 transmissions"), "{}", c[0].text);
         assert!(bar.conditions(&snap, t0 + Duration::from_secs(10) + HOLD).is_empty());
     }
 

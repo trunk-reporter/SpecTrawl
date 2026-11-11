@@ -206,8 +206,8 @@ impl LogKind {
         match self {
             LogKind::Device => "Devices",
             LogKind::Tune => "Tuning",
-            LogKind::Bus => "Bus",
-            LogKind::Headline => "Names",
+            LogKind::Bus => "Processing",
+            LogKind::Headline => "Identified",
             LogKind::Error => "Errors",
         }
     }

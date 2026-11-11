@@ -187,5 +187,5 @@ fn a_saved_slice_outlives_the_cap_and_one_saved_while_open_is_kept_when_written(
     // An evicted record can't be saved, and says why.
     let gone = view.records.iter().find(|r| r.slice_evicted && !r.tags.iter().any(|t| t == "saved")).expect("an evicted record");
     let err = e.records().save_iq(gone.id).unwrap_err();
-    assert!(err.contains("evicted"), "{err}");
+    assert!(err.contains("deleted to free disk space"), "{err}");
 }

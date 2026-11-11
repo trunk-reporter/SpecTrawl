@@ -178,7 +178,7 @@ impl Publisher {
             // Answered by the store into a later snapshot, under this command's number.
             Command::QueryRecords(q) => match engine.store() {
                 Some(s) => s.query(seq, q).map(|()| api::Outcome::Queried),
-                None => Err("history search needs the record store".into()),
+                None => Err("History is off".into()),
             },
             Command::Play { target, mode, gain, to } => engine.play(target, mode, gain, to).map(api::Outcome::Playing),
             Command::SaveIq { record } => {
@@ -205,7 +205,7 @@ impl Publisher {
         }))
         .unwrap_or_else(|payload| Err(format!("{name} panicked: {}", panic_text(payload.as_ref()))));
         if let Err(e) = &result {
-            self.log.push(target, LogKind::Error, format!("command {seq} failed: {e}"));
+            self.log.push(target, LogKind::Error, e.clone());
         }
         self.acks.push_back(Ack { seq, result });
         while self.acks.len() > self.cfg.acks_kept {

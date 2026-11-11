@@ -20,10 +20,9 @@ pub enum Col {
     Peak,
     Snr,
     Headline,
-    Emitter,
 }
 
-const COLS: [(Col, &str, f32); 9] = [
+const COLS: [(Col, &str, f32); 8] = [
     (Col::Time, "Time (UTC)", 74.0),
     (Col::Receiver, "Rx", 28.0),
     (Col::Mhz, "MHz", 84.0),
@@ -31,8 +30,7 @@ const COLS: [(Col, &str, f32); 9] = [
     (Col::Duration, "Dur", 56.0),
     (Col::Peak, "Peak dBFS", 70.0),
     (Col::Snr, "SNR dB", 56.0),
-    (Col::Headline, "What", 170.0),
-    (Col::Emitter, "Emitter", 60.0),
+    (Col::Headline, "Type", 230.0),
 ];
 
 const ROW_H: f32 = 18.0;
@@ -56,19 +54,19 @@ impl Default for RecordsPane {
     }
 }
 
-/// What a record headlines as: its headline claim's label, else "unknown".
+/// What a record was identified as, else "Unknown".
 pub fn headline(r: &SignalRecord) -> &str {
-    r.headline().map_or("unknown", |c| c.label.as_str())
+    r.headline().map_or("Unknown", |c| c.label.as_str())
 }
 
-/// The "What" column: the headline, or "unknown" with what its shape suggests (spec §4.5: "unknown" with the
-/// features), and whether it is that muted kind.
+/// The "Type" column: what it was identified as, or "Unknown" with what its shape suggests (spec §4.5: "unknown" with
+/// the features), and whether it is that muted kind.
 pub fn what(r: &SignalRecord) -> (String, bool) {
     if let Some(h) = r.headline() {
         return (h.label.clone(), false);
     }
     let shape = r.claims.iter().filter(|c| matches!(c.by, Evidence::Features { .. })).max_by(|a, b| a.confidence.total_cmp(&b.confidence));
-    (shape.map_or_else(|| "unknown".to_string(), |c| format!("unknown · looks like {}", c.label)), true)
+    (shape.map_or_else(|| "Unknown".to_string(), |c| format!("Unknown ({}?)", c.label)), true)
 }
 
 impl RecordsPane {
@@ -116,7 +114,6 @@ impl RecordsPane {
                 Col::Peak => a.peak_dbfs.total_cmp(&b.peak_dbfs),
                 Col::Snr => a.max_snr_db.total_cmp(&b.max_snr_db),
                 Col::Headline => headline(a).cmp(headline(b)),
-                Col::Emitter => a.emitter.cmp(&b.emitter),
             }
             .then(a.id.cmp(&b.id))
         };
@@ -130,7 +127,7 @@ impl RecordsPane {
             ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("MHz, tag, note, receiver…").desired_width(180.0));
             ui.separator();
             ui.label("History");
-            let resp = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("words in a claim, tag or note").desired_width(180.0));
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("type, tag or note").desired_width(180.0));
             let go = ui.button("Search").clicked() || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if go {
                 let text = self.search.trim();
@@ -147,38 +144,46 @@ impl RecordsPane {
             ui.separator();
             if ui
                 .add(egui::Button::new("Events").selected(!self.show_occupants))
-                .on_hover_text("Records shorter than a minute and narrower than 150 kHz, not broadcast or cellular")
+                .on_hover_text("Short transmissions: under a minute, under 150 kHz wide, not broadcast or cellular")
                 .clicked()
             {
                 self.show_occupants = false;
             }
             if ui
                 .add(egui::Button::new("All").selected(self.show_occupants))
-                .on_hover_text("Occupants too: long or wideband records (the Emitters tab lists them)")
+                .on_hover_text("Also continuous and wideband signals")
                 .clicked()
             {
                 self.show_occupants = true;
             }
         });
         let store_line = match &snap.store {
-            Some(s) if s.error.is_some() => format!("store: {}", s.error.as_deref().unwrap_or_default()),
-            Some(s) if s.dropped > 0 => format!("store: {} written, {} queued, {} dropped (queue full)", s.written, s.queued, s.dropped),
-            Some(s) => format!("store: {} written, {} queued", s.written, s.queued),
-            None => "records are not kept after closing (no store)".into(),
+            Some(s) if s.error.is_some() => format!("History not saving: {}", s.error.as_deref().unwrap_or_default()),
+            Some(s) if s.dropped > 0 => format!("History: {} updates lost (disk too slow)", s.dropped),
+            Some(_) => "Saving to history".into(),
+            None => "History off: transmissions are not saved".into(),
         };
         let rows = self.rows(snap);
         let source = if self.showing_history {
             match &snap.query {
                 Some(q) if Some(q.seq) == self.search_seq => {
-                    format!("{} from history{}", fmt::count(q.records.len(), "record"), if q.truncated { " (more matched)" } else { "" })
+                    format!(
+                        "{} from history{}",
+                        fmt::count(q.records.len(), "transmission"),
+                        if q.truncated { " (more matched)" } else { "" }
+                    )
                 }
                 _ => "searching…".into(),
             }
         } else {
             let occupants = snap.records.records.iter().filter(|r| r.is_occupant()).count();
             let hidden =
-                if self.show_occupants || occupants == 0 { String::new() } else { format!(" ({occupants} occupant records hidden)") };
-            format!("{} of {}{hidden}", fmt::count(rows.len(), "record"), snap.records.records.len())
+                if self.show_occupants || occupants == 0 { String::new() } else { format!(" ({occupants} continuous or wideband hidden)") };
+            if rows.len() == snap.records.records.len() {
+                fmt::count(rows.len(), "transmission")
+            } else {
+                format!("{} of {}{hidden}", fmt::count(rows.len(), "transmission"), snap.records.records.len())
+            }
         };
         ui.label(RichText::new(format!("{source} · {store_line}")).color(theme::INK2).small());
         ui.label(RichText::new(crate::systems_pane::budget_line(snap)).color(theme::INK2).small());
@@ -209,15 +214,14 @@ impl RecordsPane {
                             letter(r).to_string(),
                             format!("{:.4}", r.center_hz() / 1e6),
                             format!("{:.1}", r.bandwidth_hz() / 1e3),
-                            if r.open { "open".into() } else { fmt::secs(r.duration().as_secs_f64()) },
+                            if r.open { "on air".into() } else { fmt::secs(r.duration().as_secs_f64()) },
                             format!("{:.1}", r.peak_dbfs),
                             format!("{:.0}", r.max_snr_db),
                             what(r).0,
-                            r.emitter.map_or("–".into(), |e| e.0.to_string()),
                         ];
                         for ((col, _, w), text) in COLS.iter().zip(cells) {
                             let colour = match col {
-                                // "Unknown" is an honest answer, shown as one: not styled like a claim.
+                                // "Unknown" is muted: not styled like an identification.
                                 Col::Headline if r.headline().is_none() => theme::INK2,
                                 _ if is_sel => theme::ACCENT,
                                 _ => theme::INK,

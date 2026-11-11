@@ -520,7 +520,7 @@ pub fn classify_with(x: &[Complex32], fs: f64, bandwidth_hz: f64, hints: Hints) 
         c.features = s.features;
         c.fields = s.fields;
         c.protocol = Some(s.sync.protocol.to_string());
-        c.label = if s.sync.detail.is_empty() { s.sync.protocol.to_string() } else { format!("{} {}", s.sync.protocol, s.sync.detail) };
+        c.label = sync::label(s.sync.protocol, s.sync.detail);
         c.confidence = s.sync.confidence;
         c.sync = Some(s.sync);
         return c;

@@ -158,8 +158,7 @@ impl Monitor {
             self.expire_flex(start + x.len() as u64);
         } else if let Some(s) = rungs::sync_bank(&w).filter(|s| s.sync.protocol == self.protocol) {
             synced = true;
-            self.label =
-                if s.sync.detail.is_empty() { s.sync.protocol.to_string() } else { format!("{} {}", s.sync.protocol, s.sync.detail) };
+            self.label = detect::sync::label(s.sync.protocol, s.sync.detail);
             let (_, overlap) = timing(self.protocol);
             let skip = if first { 0 } else { (overlap * s.sync.baud) as usize };
             let new: Vec<detect::frames::Frame> = s.frames.iter().filter(|f| f.at_symbol >= skip).cloned().collect();

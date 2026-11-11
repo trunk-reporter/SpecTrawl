@@ -5,6 +5,18 @@
 //! means a negative symbol. For 4-level protocols only the outer ±3 symbols
 //! decide the sign, which is why masks drop the ±1 positions (NXDN).
 
+/// The name shown for a protocol and its variant: "P25 Phase 2", "DMR BS voice"; a variant that already carries the
+/// protocol's name stands alone ("NXDN48", not "NXDN NXDN48").
+pub fn label(protocol: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        protocol.to_string()
+    } else if detail.starts_with(protocol) {
+        detail.to_string()
+    } else {
+        format!("{protocol} {detail}")
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SyncEntry {
     pub protocol: &'static str,

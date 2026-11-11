@@ -442,14 +442,15 @@ fn the_channels_tab_lists_an_air_band_call_and_its_record_reads_the_same() {
     };
     assert_eq!((row.plan.as_str(), row.summary.as_str()), ("Air band", "AM voice"));
     // Its newest record headlines as the channel's voice, in the records list too. The row can show before the
-    // record's look has run on a slow runner, so wait for the name.
+    // record's look has run on a slow runner, and the look names it AM before the air band claim lands on the decoder
+    // manager's next pass, so wait for the final name.
     let id = *row.records.last().unwrap();
     let t0 = std::time::Instant::now();
     loop {
         let s = handle.latest();
         let rec = s.records.records.iter().find(|r| r.id == id).unwrap().clone();
         let name = spectrawl_app::records_pane::what(&rec).0;
-        if name != "Unknown" || t0.elapsed() > Duration::from_secs(15) {
+        if name == "Air band voice" || t0.elapsed() > Duration::from_secs(15) {
             assert_eq!(name, "Air band voice");
             break;
         }

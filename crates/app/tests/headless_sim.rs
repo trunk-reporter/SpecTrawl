@@ -439,10 +439,21 @@ fn the_channels_tab_lists_an_air_band_call_and_its_record_reads_the_same() {
         assert!(k < 300, "no channel row in 15 s: {:?}", handle.latest().channels);
     };
     assert_eq!((row.plan.as_str(), row.summary.as_str()), ("Air band", "AM voice"));
-    // Its newest record headlines as the channel's voice, in the records list too.
-    let s = handle.latest();
-    let rec = s.records.records.iter().find(|r| Some(&r.id) == row.records.last()).unwrap().clone();
-    assert_eq!(spectrawl_app::records_pane::what(&rec).0, "Air band voice");
+    // Its newest record headlines as the channel's voice, in the records list too. The row can show before the
+    // record's look has run on a slow runner, so wait for the name.
+    let id = *row.records.last().unwrap();
+    let t0 = std::time::Instant::now();
+    loop {
+        let s = handle.latest();
+        let rec = s.records.records.iter().find(|r| r.id == id).unwrap().clone();
+        let name = spectrawl_app::records_pane::what(&rec).0;
+        if name != "Unknown" || t0.elapsed() > Duration::from_secs(15) {
+            assert_eq!(name, "Air band voice");
+            break;
+        }
+        frame(&mut app, k);
+        k += 1;
+    }
     for _ in 0..5 {
         frame(&mut app, k);
         k += 1;

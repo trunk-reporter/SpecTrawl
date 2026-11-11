@@ -31,10 +31,10 @@ impl Tab {
         match self {
             Tab::Receiver(_) => "Receiver",
             Tab::Devices => "Devices",
-            Tab::Inspector => "Inspector",
+            Tab::Inspector => "Details",
             Tab::Log => "Log",
-            Tab::Records => "Records",
-            Tab::Emitters => "Emitters",
+            Tab::Records => "Activity",
+            Tab::Emitters => "Frequencies",
             Tab::Systems => "Systems",
             Tab::Channels => "Channels",
             Tab::Pages => "Pages",

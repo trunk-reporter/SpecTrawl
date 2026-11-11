@@ -162,7 +162,7 @@ impl ReceiverPane {
             theme::chip(ui, &letter, theme::CHIP, theme::INK);
             // The receiver's name selects it: the inspector shows its ring, stage and decoders.
             let me = crate::selection::Selection::Receiver(r.id);
-            if ui.selectable_label(*selected == me, &r.device.label).on_hover_text("Show this receiver in the inspector").clicked() {
+            if ui.selectable_label(*selected == me, &r.device.label).on_hover_text("Show details").clicked() {
                 selected.toggle(me);
             }
             for mode in [Mode::Live, Mode::Sweep] {
@@ -255,8 +255,8 @@ impl ReceiverPane {
                 Some(GainSetting::Linearity(v)) => format!("Now: linearity step {}", to_step(v)),
                 Some(GainSetting::Sensitivity(v)) => format!("Now: sensitivity step {}", to_step(v)),
                 Some(GainSetting::Auto) => "Now: automatic (AGC)".into(),
-                Some(GainSetting::Manual { lna, mixer, vga }) => format!("Now: by hand, LNA {lna}, mixer {mixer}, VGA {vga}"),
-                None => "Now: the device's default".into(),
+                Some(GainSetting::Manual { lna, mixer, vga }) => format!("Now: manual, LNA {lna}, mixer {mixer}, VGA {vga}"),
+                None => "Now: device default".into(),
             };
             ui.label(egui::RichText::new(now).color(theme::INK2));
             if ui.button("Auto").clicked() {
@@ -265,7 +265,7 @@ impl ReceiverPane {
             ui.separator();
             ui.label(egui::RichText::new("Manual").color(theme::INK2));
             if r.caps.gain_stages.is_empty() {
-                ui.label(egui::RichText::new("This device has no hand-set stages.").color(theme::INK2));
+                ui.label(egui::RichText::new("No manual gain on this device.").color(theme::INK2));
             }
             for (i, stage) in r.caps.gain_stages.iter().take(3).enumerate() {
                 ui.horizontal(|ui| {

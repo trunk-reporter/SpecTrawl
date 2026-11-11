@@ -45,7 +45,7 @@ impl Registry {
         for b in &self.backends {
             match b.enumerate() {
                 Ok(found) => entries.extend(found.into_iter().map(|info| DeviceEntry { info, open_as: None })),
-                Err(e) => log.push(None, LogKind::Device, format!("{}: enumeration failed: {e}", b.name())),
+                Err(e) => log.push(None, LogKind::Device, format!("Couldn't list {} devices: {e}", b.name())),
             }
         }
         self.entries = entries;
@@ -126,9 +126,7 @@ impl Registry {
                 log.push(Some(letter), LogKind::Tune, format!("{letter} gain set"));
                 Ok(Outcome::Done)
             }
-            Command::Tag { record, tag } | Command::Untag { record, tag } if tag.trim().is_empty() => {
-                Err(format!("record {}: an empty tag", record.0))
-            }
+            Command::Tag { tag, .. } | Command::Untag { tag, .. } if tag.trim().is_empty() => Err("A tag can't be empty".to_string()),
             Command::Tag { record, tag } => found(engine.records().tag(record, tag.trim(), true) || engine.store().is_some(), record),
             Command::Untag { record, tag } => found(engine.records().tag(record, tag.trim(), false) || engine.store().is_some(), record),
             Command::Note { record, text } => found(engine.records().note(record, &text) || engine.store().is_some(), record),
@@ -195,13 +193,13 @@ impl Registry {
     fn open(&mut self, engine: &Engine, backend: &str, serial: &str, log: &mut Log) -> Result<Outcome, String> {
         let b = self.backends.iter().find(|b| b.name() == backend).ok_or_else(|| format!("no backend named {backend}"))?;
         if let Some(o) = self.open.values().find(|o| same_device(&o.info, backend, serial)) {
-            return Err(format!("already open as {}", o.letter));
+            return Err(format!("Already open as {}", o.letter));
         }
-        let letter = self.free_letter().ok_or_else(|| "every receiver letter is in use".to_string())?;
+        let letter = self.free_letter().ok_or_else(|| "Too many receivers open".to_string())?;
         let device = b.open(serial).map_err(|e| e.to_string())?;
         let source = engine.add_source(device, Mode::Live).map_err(|e| e.to_string())?;
         let snap = source.snapshot();
-        log.push(Some(letter), LogKind::Device, format!("opened {} as {letter}", snap.info.label));
+        log.push(Some(letter), LogKind::Device, format!("Opened {} as {letter}", snap.info.label));
         self.open.insert(source.id(), Opened { letter, info: snap.info, caps: Arc::new(snap.caps), gain: None });
         self.sync();
         Ok(Outcome::Opened(source.id()))
@@ -250,5 +248,5 @@ fn no_receiver(id: SourceId) -> String {
 
 /// A record edit's outcome: the book held the record, or the store will apply it to the one it keeps.
 fn found(held: bool, record: api::RecordId) -> Result<Outcome, String> {
-    if held { Ok(Outcome::Done) } else { Err(format!("no record {}", record.0)) }
+    if held { Ok(Outcome::Done) } else { Err(format!("Transmission #{} not found", record.0)) }
 }

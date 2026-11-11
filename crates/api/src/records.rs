@@ -63,15 +63,16 @@ impl Claim {
 }
 
 impl Evidence {
-    /// The kind of evidence in a word or two: "decoded", "sync bank", "shape", "band plan", "neighbour", "position".
+    /// How it was identified, in words a user reads: "decoder", "sync word", "signal shape", "band plan", "nearby
+    /// signal", "frequency".
     pub fn kind(&self) -> &'static str {
         match self {
-            Evidence::SyncBank { .. } => "sync bank",
-            Evidence::Features { .. } => "shape",
-            Evidence::Decoder { .. } => "decoded",
+            Evidence::SyncBank { .. } => "sync word",
+            Evidence::Features { .. } => "signal shape",
+            Evidence::Decoder { .. } => "decoder",
             Evidence::BandPlan { .. } => "band plan",
-            Evidence::Neighbour { .. } => "neighbour",
-            Evidence::Position(_) => "position",
+            Evidence::Neighbour { .. } => "nearby signal",
+            Evidence::Position(_) => "frequency",
         }
     }
 }
@@ -477,7 +478,7 @@ mod standing_tests {
         assert!(matches!(s[0], Standing::NeverNames(_)), "a digital shape never names: {:?}", s[0]);
         assert_eq!(s[1], Standing::LessConfident);
         assert_eq!(s[2], Standing::Headline);
-        assert_eq!(s[3], Standing::Outranked { by: "sync bank" });
+        assert_eq!(s[3], Standing::Outranked { by: "sync word" });
         assert!(matches!(s[4], Standing::NeverNames(_)));
         assert_eq!(headline(&claims).map(|c| c.label.as_str()), Some("P25 Phase 1"));
     }

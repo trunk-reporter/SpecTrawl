@@ -65,8 +65,8 @@ pub fn entries(query: &str, snap: &Snapshot, workspaces: &[String]) -> Vec<Entry
         for x in near.into_iter().take(3) {
             let name = x.headline.as_ref().map_or("unknown", |c| c.label.as_str());
             v.push(e(
-                format!("Inspect emitter {} at {:.4} MHz ({name})", x.id.0, x.center_hz / 1e6),
-                "inspect emitter select",
+                format!("Show {:.4} MHz ({name})", x.center_hz / 1e6),
+                "show inspect frequency select",
                 "",
                 Action::InspectEmitter(x.id),
             ));
@@ -79,7 +79,7 @@ pub fn entries(query: &str, snap: &Snapshot, workspaces: &[String]) -> Vec<Entry
         v.push(e(format!("Workspace: {name}"), "workspace layout page", "", Action::Workspace(name)));
     }
     v.push(e("Reset layout".into(), "reset layout default", "", Action::ResetLayout));
-    v.push(e("Clear the selection".into(), "clear deselect selection", "Esc", Action::ClearSelection));
+    v.push(e("Clear selection".into(), "clear deselect selection", "Esc", Action::ClearSelection));
     for t in TABS {
         v.push(e(format!("Pop out {} into a window", t.name()), "pop out window", "", Action::PopOut(t.clone())));
     }

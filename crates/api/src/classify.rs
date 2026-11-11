@@ -206,9 +206,9 @@ pub enum Reach {
 impl Reach {
     pub fn name(self) -> &'static str {
         match self {
-            Reach::Decodes => "decodes",
-            Reach::Names => "names by sync",
-            Reach::Shape => "by shape",
+            Reach::Decodes => "decoded",
+            Reach::Names => "identified",
+            Reach::Shape => "measured",
         }
     }
 }

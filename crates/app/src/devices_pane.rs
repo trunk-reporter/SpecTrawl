@@ -35,7 +35,7 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, draft: &mut BudgetDraft, out: &m
                     }
                     Some(id) => {
                         let letter = snap.receivers.iter().find(|r| r.id == id).map_or('?', |r| r.letter);
-                        ui.label(egui::RichText::new(format!("open as {letter}")).color(theme::ACCENT));
+                        ui.label(egui::RichText::new(format!("Open as {letter}")).color(theme::ACCENT));
                         if ui.button("Close").clicked() {
                             out.push(Command::Close(id));
                         }
@@ -46,12 +46,12 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, draft: &mut BudgetDraft, out: &m
         });
 
         ui.add_space(12.0);
-        ui.label(theme::label("Ring budget"));
+        ui.label(theme::label("Sample buffer"));
         egui::Grid::new("ring_budget").num_columns(2).show(ui, |ui| {
-            ui.label("Guaranteed");
+            ui.label("Keep at least");
             ui.add(egui::DragValue::new(&mut draft.guaranteed_secs).range(1.0..=3600.0).speed(1.0).suffix(" s"));
             ui.end_row();
-            ui.label("Ceiling");
+            ui.label("Memory limit");
             ui.add(egui::DragValue::new(&mut draft.ceiling_mb).range(64..=1 << 24).speed(16.0).suffix(" MB"));
             ui.end_row();
         });
@@ -63,11 +63,14 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, draft: &mut BudgetDraft, out: &m
         ui.horizontal(|ui| {
             let b = &snap.bus;
             ui.label(
-                egui::RichText::new(format!("workers {} · shed {} · panicked {}", b.workers, b.shed_total, b.panicked_total))
-                    .color(theme::INK2),
+                egui::RichText::new(format!(
+                    "Processing threads {} · channels dropped {} · crashes {}",
+                    b.workers, b.shed_total, b.panicked_total
+                ))
+                .color(theme::INK2),
             );
             if b.saturated {
-                ui.label(egui::RichText::new("saturated").color(theme::CAUTION));
+                ui.label(egui::RichText::new("overloaded").color(theme::CAUTION));
             }
         });
     });

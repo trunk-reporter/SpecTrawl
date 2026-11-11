@@ -44,7 +44,13 @@ pub fn clock(t: std::time::SystemTime) -> String {
 
 /// `1 channel`, `3 channels`.
 pub fn count(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+    if n == 1 {
+        format!("1 {noun}")
+    } else if let Some(stem) = noun.strip_suffix('y').filter(|s| !s.ends_with(['a', 'e', 'o', 'u'])) {
+        format!("{n} {stem}ies")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +68,8 @@ mod tests {
         assert_eq!(secs(30.0), "30 s");
         assert_eq!(secs(0.5), "0.5 s");
         assert_eq!(secs(-1.0), "0 s");
+        assert_eq!(count(3, "frequency"), "3 frequencies");
+        assert_eq!(count(2, "relay"), "2 relays");
         // Rounded first, then formatted: no "60 s" and no "10.0 s".
         assert_eq!(secs(59.6), "1 m 0 s");
         assert_eq!(secs(59.4), "59 s");

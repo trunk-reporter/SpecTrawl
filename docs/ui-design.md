@@ -85,6 +85,26 @@ restyled.
 Fixed sizes: table row height (18 px) and the spectrum trace height. Extra
 pixels go to waterfall history and more table rows, never to chrome.
 
+8. **Words on screen are the user's, not the code's** (owner, 2026-11-11).
+   The screen says what something is and how it was found, never why the
+   code chose it: no sentences explaining the ranking rule, no narration.
+   Code names map to screen words like this:
+
+   | Code | On screen |
+   |---|---|
+   | record | transmission (the Records tab is **Activity**) |
+   | emitter | frequency (the Emitters tab is **Frequencies**) |
+   | headline claim | **Identified as** |
+   | other claims | **Other matches** |
+   | evidence kind | by decoder, by sync word, by signal shape |
+   | band-plan claim | the **Band** field, not an identification |
+   | occupant | continuous or wideband |
+   | slice | IQ recording |
+   | ring, guaranteed, ceiling | sample buffer, keep at least, memory limit |
+   | bus, shed, panicked | processing, dropped, crashed |
+   | classify pool, look | identification, checked |
+   | Inspector | **Details** |
+
 ## 2. Foundation changes (no visible change, done first)
 
 ### 2.1 Receiver identity

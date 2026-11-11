@@ -30,11 +30,11 @@ const COLS: [(Col, &str, f32); 8] = [
     (Col::Receiver, "Rx", 28.0),
     (Col::Mhz, "MHz", 84.0),
     (Col::Khz, "kHz", 56.0),
-    (Col::Records, "Records", 60.0),
+    (Col::Records, "Count", 50.0),
     (Col::OnAir, "On air", 64.0),
     (Col::Duty, "Duty %", 56.0),
     (Col::LastSeen, "Last seen", 90.0),
-    (Col::What, "What", 220.0),
+    (Col::What, "Type", 220.0),
 ];
 
 pub struct EmittersPane {
@@ -63,7 +63,7 @@ impl EmittersPane {
     /// The emitters to list, filtered by the words (MHz, name, receiver letter) and sorted.
     pub fn rows(&self, snap: &Snapshot) -> Vec<std::sync::Arc<EmitterView>> {
         let letter = |e: &EmitterView| snap.receivers.iter().find(|r| *r.device.serial == *e.serial).map(|r| r.letter);
-        let name = |e: &EmitterView| e.headline.as_ref().map_or("unknown".to_string(), |c| c.label.clone());
+        let name = |e: &EmitterView| e.headline.as_ref().map_or("Unknown".to_string(), |c| c.label.clone());
         let words: Vec<String> = self.filter.split_whitespace().map(str::to_lowercase).collect();
         let mut rows: Vec<_> = snap
             .records
@@ -103,9 +103,13 @@ impl EmittersPane {
         let rows = self.rows(snap);
         let named = rows.iter().filter(|e| e.headline.is_some()).count();
         ui.label(
-            RichText::new(format!("{} ({named} named) of {}", fmt::count(rows.len(), "emitter"), snap.records.emitters.len()))
-                .color(theme::INK2)
-                .small(),
+            RichText::new(if rows.len() == snap.records.emitters.len() {
+                format!("{}, {named} identified", fmt::count(rows.len(), "frequency"))
+            } else {
+                format!("{} of {}, {named} identified", fmt::count(rows.len(), "frequency"), snap.records.emitters.len())
+            })
+            .color(theme::INK2)
+            .small(),
         );
         ui.separator();
         ui.horizontal(|ui| {
@@ -137,7 +141,7 @@ impl EmittersPane {
                             fmt::secs(e.on_time_s),
                             format!("{:.0}", e.duty * 100.0),
                             age(e.last_seen),
-                            e.headline.as_ref().map_or("unknown".to_string(), |c| c.label.clone()),
+                            e.headline.as_ref().map_or("Unknown".to_string(), |c| c.label.clone()),
                         ];
                         for ((col, _, w), text) in COLS.iter().zip(cells) {
                             let colour = match col {

@@ -88,7 +88,7 @@ fn the_app_shows_the_simulator_and_never_blocks_on_the_engine() {
             assert!(pane.history_len() >= 40, "{} rows after ~3.7 s", pane.history_len());
             // Engine rows overlap by one hop; the history must take that seam as contiguous, not as a hole.
             assert_eq!(pane.history_holes(), 0, "hole rows in a gap-free stream");
-            assert!(pane.last_status().text.starts_with("Live at 855.250 MHz, 10 MS/s: holding "), "{}", pane.last_status().text);
+            assert!(pane.last_status().text.starts_with("Live at 855.250 MHz, 10 MS/s · "), "{}", pane.last_status().text);
             assert!(handle.latest().receivers.iter().any(|r| r.letter == 'B'), "the slow device opened as B");
             stage = handle.latest().receivers.iter().find(|r| r.id == id).map(|r| r.stage.clone());
         }
@@ -145,7 +145,7 @@ fn records_list_and_box_with_one_snapshot_in_five() {
     for hz in [851.0125e6, 855.0e6] {
         let r =
             rows.iter().find(|r| (r.center_hz() - hz).abs() < 3e3 && r.open).unwrap_or_else(|| panic!("no open record at {hz}: {rows:?}"));
-        assert_eq!(spectrawl_app::records_pane::headline(r), "unknown");
+        assert_eq!(spectrawl_app::records_pane::headline(r), "Unknown");
         let (top, bottom) = pane.record_rows(r).unwrap_or_else(|| panic!("no box for {r:?}"));
         assert_eq!(top, 0, "an open record reaches the newest row: {r:?}");
         assert!(bottom > 20, "{r:?} spans rows {top}..{bottom}");
@@ -264,8 +264,8 @@ fn play_on_a_record_plays_it_and_stop_stops_it() {
     }
     let p = playing.expect("the play reached Playing");
     let line = spectrawl_app::inspector::Inspector::play_line(&p);
-    // 855 MHz is not an air band: NFM, chosen by band, from the ring.
-    assert!(line.starts_with("playing") && line.contains("NFM (by band) from the ring"), "{line}");
+    // 855 MHz is not an air band: NFM, chosen automatically.
+    assert!(line.starts_with("playing") && line.ends_with("NFM (auto)"), "{line}");
     app.push_command(Command::StopPlay(p.id));
     let mut stopped = false;
     for k in 160..200 {
@@ -373,8 +373,10 @@ fn the_systems_tab_shows_the_p25_site_its_decoder_and_its_record_says_the_same()
         frame(&mut app, k);
         k += 1;
     }
-    let line = spectrawl_app::systems_pane::budget_line(&handle.latest());
-    assert!(line.starts_with("Looked at ") && line.contains(" 0 missed"), "{line}");
+    // No look lost its IQ (a full queue on a one-thread runner may drop some, which the line counts as skipped).
+    let s = handle.latest();
+    let line = spectrawl_app::systems_pane::budget_line(&s);
+    assert!(line.starts_with("Identification: ") && s.classify.missed == 0, "{line}");
     frame_ms.sort_by(|a, b| a.total_cmp(b));
     let max = *frame_ms.last().unwrap();
     assert!(max < 100.0, "a frame took {max:.1} ms");
@@ -439,10 +441,22 @@ fn the_channels_tab_lists_an_air_band_call_and_its_record_reads_the_same() {
         assert!(k < 300, "no channel row in 15 s: {:?}", handle.latest().channels);
     };
     assert_eq!((row.plan.as_str(), row.summary.as_str()), ("Air band", "AM voice"));
-    // Its newest record headlines as the channel's voice, in the records list too.
-    let s = handle.latest();
-    let rec = s.records.records.iter().find(|r| Some(&r.id) == row.records.last()).unwrap().clone();
-    assert_eq!(spectrawl_app::records_pane::what(&rec).0, "Air band voice");
+    // Its newest record headlines as the channel's voice, in the records list too. The row can show before the
+    // record's look has run on a slow runner, and the look names it AM before the air band claim lands on the decoder
+    // manager's next pass, so wait for the final name.
+    let id = *row.records.last().unwrap();
+    let t0 = std::time::Instant::now();
+    loop {
+        let s = handle.latest();
+        let rec = s.records.records.iter().find(|r| r.id == id).unwrap().clone();
+        let name = spectrawl_app::records_pane::what(&rec).0;
+        if name == "Air band voice" || t0.elapsed() > Duration::from_secs(15) {
+            assert_eq!(name, "Air band voice");
+            break;
+        }
+        frame(&mut app, k);
+        k += 1;
+    }
     for _ in 0..5 {
         frame(&mut app, k);
         k += 1;

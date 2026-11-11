@@ -1,5 +1,5 @@
-//! The inspector explains a record's name: every claim, its numbers, and why it did or didn't win (spec §5; the owner's
-//! main frustration is classification mistakes, so a wrong name must be explainable from the inspector alone).
+//! The inspector shows what a transmission was identified as, by which method and on what numbers, then the other
+//! matches (spec §5: a wrong name must be checkable from the inspector alone), in the user's words.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -44,7 +44,7 @@ fn record(claims: Vec<Claim>) -> SignalRecord {
 }
 
 #[test]
-fn a_selected_record_shows_every_claim_and_why_the_headline_won() {
+fn a_selected_record_shows_what_it_was_identified_as_and_the_other_matches() {
     let shape = Evidence::Features {
         bandwidth_hz: 11.6e3,
         snr_db: 41.0,
@@ -75,16 +75,13 @@ fn a_selected_record_shows_every_claim_and_why_the_headline_won() {
     // The first frame installs the fonts; the next ones draw.
     h.run_steps(3);
 
-    for text in [
-        "DMR BS voice",
-        "the name: the strongest kind of claim, and the most confident of its kind",
-        "never the name: a shape names only AM or analog FM, measured at 60 % or more",
-        "4800 Bd, 4 levels",
-        "inferred from band plan",
-        "never the name: the band plan describes where it is, never what it is",
-    ] {
+    for text in
+        ["IDENTIFIED AS", "DMR BS voice", "by sync word", "OTHER MATCHES", "by signal shape", "4800 Bd, 4 levels", "800 MHz trunking"]
+    {
         assert!(h.query_all_by_label_contains(text).next().is_some(), "the inspector should show {text:?}");
     }
+    // The band plan is the Band field, not a match.
+    assert!(h.query_all_by_label_contains("Public safety 800").next().is_none());
 }
 
 #[test]
@@ -99,7 +96,7 @@ fn the_page_bar_switches_layouts_and_a_saved_layout_joins_it() {
     h.get_by_label("Paging").click();
     h.run_steps(2);
     assert_eq!(h.state().page(), "Paging");
-    assert!(h.query_all_by_label_contains("a page appears once a POCSAG or FLEX monitor decodes one").next().is_some());
+    assert!(h.query_all_by_label_contains("No pages yet.").next().is_some());
     // Saved under a name, it joins the page bar and is the page in use.
     h.state_mut().save_page("Night watch");
     h.run_steps(2);
@@ -163,5 +160,5 @@ fn save_iq_on_a_record_asks_for_its_slice_and_shows_where_it_went() {
     }];
     swap.store(Arc::new(snap));
     h.run_steps(3);
-    assert!(h.query_all_by_label_contains("IQ saved to /data/saved/record-42.sigmf-data once its slice is written").next().is_some());
+    assert!(h.query_all_by_label_contains("IQ saved to /data/saved/record-42.sigmf-data when the transmission ends").next().is_some());
 }

@@ -44,7 +44,7 @@ impl CataloguePane {
         let decodes = snap.catalogue.iter().filter(|e| e.reach == Reach::Decodes).count();
         ui.label(
             RichText::new(format!(
-                "{} ({decodes} decoded, the rest named by sync or shape) · counts are over the {} recent records",
+                "{}, {decodes} fully decoded · counts from the last {} transmissions",
                 fmt::count(snap.catalogue.len(), "mode"),
                 snap.records.records.len()
             ))
@@ -68,8 +68,8 @@ impl CataloguePane {
                         theme::chip(ui, e.reach.name(), theme::CHIP, theme::INK2);
                         let count = match (named, suggested) {
                             (0, 0) => RichText::new("none yet").color(theme::INK2),
-                            (n, 0) => RichText::new(format!("{n} named")).monospace(),
-                            (n, s) => RichText::new(format!("{n} named, {s} suggested")).monospace(),
+                            (n, 0) => RichText::new(format!("{n} seen")).monospace(),
+                            (n, s) => RichText::new(format!("{n} seen, {s} possible")).monospace(),
                         };
                         ui.label(count);
                         ui.label(RichText::new(e.blurb).color(theme::INK2));

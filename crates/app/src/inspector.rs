@@ -1,13 +1,15 @@
-//! The inspector (spec §5): whatever is selected, in full. For a record, every claim with its evidence, confidence and
-//! numbers, and why the headline won and each other claim didn't (classification mistakes must be explainable from
-//! here alone); the decoder attached to its emitter; replay, its slice, tags and notes. For an emitter, a system, a
-//! channel or a receiver, what the snapshot knows of it and its records.
+//! The inspector (spec §5): whatever is selected, in full. For a record, what it was identified as and how (method,
+//! confidence, the measured numbers), any other matches, the decoder on its frequency, replay, its IQ, tags and notes.
+//! For an emitter, a system, a channel or a receiver, what the snapshot knows of it and its records.
+//!
+//! Words on screen are the user's, not the code's: a record is a "transmission", an emitter a "frequency", claims are
+//! "identified as" and "other matches"; nothing explains the ranking rule.
 
 use std::time::SystemTime;
 
 use api::{
     AudioMode, Claim, Command, DecoderView, EmitterView, Evidence, PlayState, PlayTarget, PlayTo, PlayView, RecordId, SignalRecord,
-    Snapshot, Standing, fmt, standing,
+    Snapshot, fmt,
 };
 use egui::RichText;
 
@@ -61,67 +63,50 @@ fn mhz4(hz: f64) -> egui::text::LayoutJob {
     theme::value_unit(&format!("{:.4}", hz / 1e6), "MHz")
 }
 
-/// A claim's numbers in words: "12 syncs, 3 of 4 frames decoded", "11.6 kHz, 41 dB SNR, 4800 Bd, 4 levels".
+/// What was measured, in words: "12 syncs, 3 of 4 frames decoded", "11.6 kHz, 41 dB SNR, 4800 Bd, 4 levels".
 pub fn evidence_numbers(c: &Claim) -> String {
     match &c.by {
         Evidence::SyncBank { syncs, frames_tried, frames_decoded, .. } => {
             let frames = if *frames_tried > 0 { format!(", {frames_decoded} of {frames_tried} frames decoded") } else { String::new() };
             format!("{syncs} syncs{frames}")
         }
-        Evidence::Features { bandwidth_hz, snr_db, duty, envelope_cv, symbol_rate, fsk_levels, deviation_hz, carrier_hz } => {
+        Evidence::Features { bandwidth_hz, snr_db, symbol_rate, fsk_levels, deviation_hz, carrier_hz, .. } => {
             let mut v = vec![format!("{:.1} kHz", bandwidth_hz / 1e3)];
             if snr_db.is_finite() {
                 v.push(format!("{snr_db:.0} dB SNR"));
             }
-            v.push(format!("on {:.0} %", duty * 100.0));
-            v.extend(envelope_cv.map(|cv| format!("envelope CV {cv:.2}")));
             v.extend(symbol_rate.map(|r| format!("{r:.0} Bd")));
             v.extend(fsk_levels.map(|n| format!("{n} levels")));
             v.extend(deviation_hz.map(|d| format!("±{:.1} kHz deviation", d / 1e3)));
             v.extend(carrier_hz.map(|c| format!("carrier {:.4} MHz", c / 1e6)));
             v.join(", ")
         }
+        // The decoder's own sentence already names its mode and frequency.
         Evidence::Decoder { mode, locked, summary, .. } => {
-            let lock = if *locked { "locked" } else { "not locked now" };
-            if summary.is_empty() { format!("{mode}, {lock}") } else { format!("{mode}, {lock}: {summary}") }
+            let text = if summary.is_empty() { mode.clone() } else { summary.clone() };
+            if *locked { text } else { format!("{text} (not locked)") }
         }
         Evidence::BandPlan { entry } => entry.clone(),
-        Evidence::Neighbour { emitter } => format!("from emitter {}", emitter.0),
+        Evidence::Neighbour { .. } => "from a nearby signal".into(),
         Evidence::Position(p) => format!("{p:?}"),
     }
 }
 
-/// Why a claim did or didn't name the record, in words.
-pub fn standing_words(s: Standing) -> String {
-    match s {
-        Standing::Headline => "the name: the strongest kind of claim, and the most confident of its kind".into(),
-        Standing::Outranked { by } => format!("not the name: a {by} claim outranks it"),
-        Standing::LessConfident => "not the name: a claim of the same kind is more confident".into(),
-        Standing::NeverNames(why) => format!("never the name: {why}"),
-    }
-}
-
-/// One claim: label, kind and confidence on the first line (decoded solid, inferred muted with the word), its numbers,
-/// and where it stands.
-fn claim(ui: &mut egui::Ui, claims: &[Claim], c: &Claim) {
-    let s = standing(claims, c);
-    let ink = if c.is_inferred() { theme::INK2 } else { theme::INK };
-    let kind = if c.is_inferred() { format!("inferred from {}", c.by.kind()) } else { c.by.kind().to_string() };
+/// One identification: what, by which method and how sure on the first line (the chosen one solid, the others muted),
+/// then what was measured.
+fn claim(ui: &mut egui::Ui, c: &Claim, chosen: bool) {
+    let ink = if chosen { theme::INK } else { theme::INK2 };
     ui.horizontal_wrapped(|ui| {
-        if s == Standing::Headline {
-            theme::dot(ui, theme::ACCENT, true);
-        }
         ui.label(RichText::new(&c.label).color(ink).size(14.0));
-        ui.label(RichText::new(kind).color(theme::INK2));
+        ui.label(RichText::new(format!("by {}", c.by.kind())).color(theme::INK2));
         ui.label(theme::value_unit(&format!("{:.0}", c.confidence * 100.0), "%"));
     });
-    ui.indent(("claim", c.label.as_str()), |ui| {
-        let numbers = evidence_numbers(c);
-        if !numbers.is_empty() {
+    let numbers = evidence_numbers(c);
+    if !numbers.is_empty() {
+        ui.indent(("claim", c.label.as_str()), |ui| {
             ui.label(RichText::new(numbers).monospace().color(theme::INK2).size(11.5));
-        }
-        ui.label(RichText::new(standing_words(s)).color(theme::INK2).italics().size(11.5));
-    });
+        });
+    }
 }
 
 /// A decoder's lamp, sentence and counts, then its health plots.
@@ -145,7 +130,10 @@ fn decoder(ui: &mut egui::Ui, d: &DecoderView, h: &History) {
         }
     }
     if let Some(level) = d.level_dbfs {
-        ui.label(theme::value_unit(&format!("{level:.1}"), "dBFS in its channel"));
+        ui.horizontal(|ui| {
+            ui.label(theme::label("Level"));
+            ui.label(theme::value_unit(&format!("{level:.1}"), "dBFS"));
+        });
     }
     if let Some(s) = h.decoders.get(&(d.source, d.emitter, d.mode.clone())) {
         health::plot(ui, "SNR", "dB", &s.snr_db, 0, None);
@@ -160,7 +148,7 @@ fn record_links<'a>(ui: &mut egui::Ui, records: impl Iterator<Item = &'a SignalR
     rows.sort_by_key(|r| std::cmp::Reverse(r.t_start));
     let n = rows.len();
     for r in rows.into_iter().take(max) {
-        let what = r.headline().map_or("unknown", |c| c.label.as_str());
+        let what = r.headline().map_or("Unknown", |c| c.label.as_str());
         let text = format!("{}  {:.4}  {}  {}", fmt::clock(r.t_start), r.center_hz() / 1e6, fmt::secs(r.duration().as_secs_f64()), what);
         if ui.selectable_label(false, RichText::new(text).monospace().size(11.5)).clicked() {
             *sel = Selection::Record(r.id);
@@ -170,7 +158,7 @@ fn record_links<'a>(ui: &mut egui::Ui, records: impl Iterator<Item = &'a SignalR
         muted(ui, format!("and {} older", n - max));
     }
     if n == 0 {
-        muted(ui, "none in the recent records");
+        muted(ui, "None recently.");
     }
 }
 
@@ -182,11 +170,11 @@ impl Inspector {
             }
             Selection::Record(id) => match snap.records.records.iter().find(|r| r.id == id).cloned() {
                 Some(r) => self.record(ui, snap, &r, sel, out, h),
-                None => muted(ui, format!("Record {} is no longer in the recent records; search History for it.", id.0)),
+                None => muted(ui, "This transmission is no longer in the recent list. Search History for it."),
             },
             Selection::Emitter(e) => match snap.records.emitters.iter().find(|x| x.id == e).cloned() {
                 Some(x) => emitter(ui, snap, &x, sel, h),
-                None => muted(ui, format!("Emitter {} is no longer among the recent emitters.", e.0)),
+                None => muted(ui, "This frequency has not been heard recently."),
             },
             Selection::System(e) => match snap.systems.systems.iter().find(|s| s.emitter == e).cloned() {
                 Some(s) => {
@@ -202,15 +190,15 @@ impl Inspector {
                     section(ui, "Decoder");
                     match snap.decoders.iter().find(|d| d.emitter == e) {
                         Some(d) => decoder(ui, d, h),
-                        None => muted(ui, "none attached now"),
+                        None => muted(ui, "None running."),
                     }
-                    if ui.link(format!("Emitter {}", e.0)).clicked() {
+                    if ui.link(format!("Control channel {:.4} MHz", s.control_hz / 1e6)).clicked() {
                         *sel = Selection::Emitter(e);
                     }
-                    section(ui, "Its records");
+                    section(ui, "Recent transmissions");
                     record_links(ui, snap.records.records.iter().filter(|r| s.records.contains(&r.id)).map(|r| &**r), sel, 12);
                 }
-                None => muted(ui, "That system is no longer in the systems view."),
+                None => muted(ui, "This system has not been heard recently."),
             },
             Selection::Channel { plan, name } => match snap.channels.channels.iter().find(|c| c.plan == plan && c.name == name).cloned() {
                 Some(c) => {
@@ -228,10 +216,10 @@ impl Inspector {
                         field(ui, "Last heard", format!("{} ({})", fmt::clock(c.last_heard), ago(c.last_heard)));
                     });
                     ui.label(&c.summary);
-                    section(ui, "Its records");
+                    section(ui, "Recent transmissions");
                     record_links(ui, snap.records.records.iter().filter(|r| c.records.contains(&r.id)).map(|r| &**r), sel, 12);
                 }
-                None => muted(ui, "That channel is no longer in the channels view."),
+                None => muted(ui, "This channel has not been heard recently."),
             },
             Selection::Receiver(id) => match snap.receivers.iter().find(|r| r.id == id) {
                 Some(r) => {
@@ -248,23 +236,22 @@ impl Inspector {
                         field(ui, "Mode", format!("{:?}", r.mode));
                         field(ui, "Centre", mhz4(r.center_hz));
                         field(ui, "Rate", fmt::rate(r.sample_rate));
-                        field(ui, "Holding", format!("{} (guaranteed {})", fmt::secs(r.ring.held_secs), fmt::secs(r.ring.guaranteed_secs)));
-                        field(ui, "Ceiling", fmt::secs(r.ring.ceiling_secs));
-                        field(ui, "Device gaps", r.ring.device_gaps.to_string());
+                        field(ui, "Buffered", format!("{} (at least {})", fmt::secs(r.ring.held_secs), fmt::secs(r.ring.guaranteed_secs)));
+                        field(ui, "Buffer limit", fmt::secs(r.ring.ceiling_secs));
+                        field(ui, "Sample drops", r.ring.device_gaps.to_string());
                         field(ui, "Clipping", r.ring.overloads.to_string());
-                        field(ui, "FFT behind", fmt::secs(r.stage.behind_secs));
-                        field(ui, "Channels", r.consumers.len().to_string());
+                        field(ui, "Display lag", fmt::secs(r.stage.behind_secs));
                     });
                     if let Some(s) = h.receivers.get(&id) {
                         section(ui, "Health");
-                        health::plot(ui, "Worst lag", "s", &s.lag_s, 2, None);
-                        health::plot(ui, "FFT behind", "s", &s.behind_s, 2, None);
-                        health::plot(ui, "Holding", "s", &s.held_s, 0, None);
+                        health::plot(ui, "Processing lag", "s", &s.lag_s, 2, None);
+                        health::plot(ui, "Display lag", "s", &s.behind_s, 2, None);
+                        health::plot(ui, "Buffered", "s", &s.held_s, 0, None);
                     }
                     section(ui, "Decoders");
                     let mine: Vec<_> = snap.decoders.iter().filter(|d| d.source == id).collect();
                     if mine.is_empty() {
-                        muted(ui, "none running");
+                        muted(ui, "None running.");
                     }
                     for d in mine {
                         if ui.link(format!("{} {:.4} MHz", d.mode, d.center_hz / 1e6)).clicked() {
@@ -285,73 +272,72 @@ impl Inspector {
                 None => ("Unknown", theme::INK2),
             };
             ui.label(RichText::new(name).size(17.0).color(ink));
-            muted(ui, format!("record {}", r.id.0));
+            muted(ui, format!("#{}", r.id.0));
         });
         let letter = snap.receivers.iter().find(|x| x.id == r.source).map_or('–', |x| x.letter);
         grid(ui, "record", |ui| {
             field(ui, "Centre", mhz4(r.center_hz()));
             field(ui, "Width", theme::value_unit(&format!("{:.1}", r.bandwidth_hz() / 1e3), "kHz"));
-            let dur = if r.open { "open".to_string() } else { fmt::secs(r.duration().as_secs_f64()) };
+            let dur = if r.open { "on air".to_string() } else { fmt::secs(r.duration().as_secs_f64()) };
             field(ui, "Duration", dur);
             field(ui, "Started", format!("{} ({})", fmt::clock(r.t_start), ago(r.t_start)));
             field(ui, "Peak", theme::value_unit(&format!("{:.1}", r.peak_dbfs), "dBFS"));
             field(ui, "SNR", theme::value_unit(&format!("{:.0}", r.max_snr_db), "dB"));
             field(ui, "Receiver", RichText::new(letter.to_string()).monospace());
-            ui.label(theme::label("Emitter"));
-            match r.emitter {
-                Some(e) => {
-                    if ui.link(format!("{}", e.0)).clicked() {
-                        *sel = Selection::Emitter(e);
-                    }
-                }
-                None => {
-                    muted(ui, "none yet");
-                }
+            // The band plan says where it is, not what it is: a field, not an identification.
+            if let Some(entry) = r.claims.iter().find_map(|c| match &c.by {
+                Evidence::BandPlan { entry } => Some(entry.as_str()),
+                _ => None,
+            }) {
+                field(ui, "Band", entry);
             }
-            ui.end_row();
         });
+        if let Some(e) = r.emitter
+            && ui.link(format!("All transmissions on {:.4} MHz", r.center_hz() / 1e6)).clicked()
+        {
+            *sel = Selection::Emitter(e);
+        }
         self.listen(ui, snap, r, out);
 
-        section(ui, "Why this name");
-        if r.claims.is_empty() {
-            muted(ui, "No claims yet: it is still waiting for its look, or it was too weak to look at.");
-        } else if headline.is_none() {
-            muted(ui, "Unknown: no decode, no sync word, and no analog shape measured clearly enough to name it.");
+        section(ui, "Identified as");
+        match headline {
+            Some(c) => claim(ui, c, true),
+            None if r.open && r.claims.is_empty() => muted(ui, "Not identified yet."),
+            None => muted(ui, "Unknown"),
         }
-        // The headline first, then the rest in the rule's order.
-        let mut order: Vec<&Claim> = r.claims.iter().collect();
-        order.sort_by_key(|c| match standing(&r.claims, c) {
-            Standing::Headline => 0,
-            Standing::LessConfident => 1,
-            Standing::Outranked { .. } => 2,
-            Standing::NeverNames(_) => 3,
-        });
-        for c in order {
-            claim(ui, &r.claims, c);
+        let mut others: Vec<&Claim> = r
+            .claims
+            .iter()
+            .filter(|c| !headline.is_some_and(|h| std::ptr::eq(h, *c)) && !matches!(c.by, Evidence::BandPlan { .. }))
+            .collect();
+        if !others.is_empty() {
+            others.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+            section(ui, "Other matches");
+            for c in others {
+                claim(ui, c, false);
+            }
         }
 
         if let Some(e) = r.emitter {
             let decs: Vec<_> = snap.decoders.iter().filter(|d| d.emitter == e).collect();
             if !decs.is_empty() {
-                section(ui, "Decoder on its emitter");
+                section(ui, "Decoder");
                 for d in decs {
                     decoder(ui, d, h);
                 }
             }
         }
 
-        section(ui, "Slice");
+        section(ui, "IQ recording");
         match (&r.iq_clip, r.slice_evicted) {
             (Some(c), _) => {
                 ui.label(RichText::new(format!("{} ({})", c.path.display(), fmt::secs(c.samples as f64 / c.rate))).monospace().size(11.5))
             }
-            (None, true) => ui.label(RichText::new("removed to stay under the disk cap").color(theme::INK2)),
-            (None, false) if r.open => ui.label(RichText::new("written when the record closes").color(theme::INK2)),
-            (None, false) => ui.label(RichText::new("none").color(theme::INK2)),
+            (None, true) => ui.label(RichText::new("Deleted to free disk space.").color(theme::INK2)),
+            (None, false) if r.open => ui.label(RichText::new("Written when the transmission ends.").color(theme::INK2)),
+            (None, false) => ui.label(RichText::new("None").color(theme::INK2)),
         };
-        if !r.slice_evicted
-            && ui.button("Save IQ").on_hover_text("Keep this record's IQ (SigMF) out of reach of the disk cap, and tag it saved").clicked()
-        {
+        if !r.slice_evicted && ui.button("Save IQ").on_hover_text("Keep this IQ recording (SigMF) so it is never deleted").clicked() {
             out.push(Command::SaveIq { record: r.id });
         }
         if let Some((text, ok)) = Self::save_line(snap, r.id) {
@@ -364,10 +350,10 @@ impl Inspector {
     pub fn save_line(snap: &Snapshot, id: RecordId) -> Option<(String, bool)> {
         snap.acks.iter().rev().find_map(|a| match &a.result {
             Ok(api::Outcome::SavedIq { record, path, pending }) if *record == id => {
-                let when = if *pending { " once its slice is written" } else { "" };
+                let when = if *pending { " when the transmission ends" } else { "" };
                 Some((format!("IQ saved to {}.sigmf-data{when}", path.display()), true))
             }
-            Err(e) if e.starts_with(&format!("record {} has no IQ to save", id.0)) => Some((e.clone(), false)),
+            Err(e) if e.starts_with(&format!("Transmission #{} has no IQ to save", id.0)) => Some((e.clone(), false)),
             _ => None,
         })
     }
@@ -391,11 +377,7 @@ impl Inspector {
 
     /// The line shown for a replay.
     pub fn play_line(p: &PlayView) -> String {
-        let mode = format!("{}{}", p.mode.name(), if p.mode_guessed { " (by band)" } else { "" });
-        let from = match p.from {
-            api::PlayFrom::Ring => "ring",
-            api::PlayFrom::Slice => "slice",
-        };
+        let mode = format!("{}{}", p.mode.name(), if p.mode_guessed { " (auto)" } else { "" });
         let what = match (&p.to, &p.state) {
             (PlayTo::Wav(path), PlayState::Finished) => format!("saved {}", path.display()),
             (PlayTo::Wav(_), s) if !s.is_over() => "saving".into(),
@@ -406,7 +388,7 @@ impl Inspector {
             (_, PlayState::EndedEarly(why)) => format!("ended early: {why}"),
         };
         let length = if p.complete { fmt::secs(p.length_s) } else { format!("{}…", fmt::secs(p.length_s)) };
-        format!("{what} · {} of {length} · {mode} from the {from}", fmt::secs(p.position_s))
+        format!("{what} · {} of {length} · {mode}", fmt::secs(p.position_s))
     }
 
     fn listen(&mut self, ui: &mut egui::Ui, snap: &Snapshot, r: &SignalRecord, out: &mut Vec<Command>) {
@@ -426,12 +408,12 @@ impl Inspector {
                     }
                 }
                 _ => {
-                    if ui.button("▶ Play").on_hover_text("Hear it (from the ring, or its slice)").clicked() {
+                    if ui.button("▶ Play").clicked() {
                         out.push(self.play_command(r.id));
                     }
                 }
             }
-            if ui.button("Save audio").on_hover_text("Write the demodulated sound out as a WAV (for IQ, Save IQ below)").clicked() {
+            if ui.button("Save audio").on_hover_text("Save the audio as a WAV file").clicked() {
                 out.push(self.save_command(r.id));
             }
         });
@@ -445,11 +427,11 @@ impl Inspector {
             ui.label(RichText::new(Self::play_line(p)).color(colour));
         }
         if let Err(e) = &snap.audio.output {
-            muted(ui, format!("no sound: {e}"));
+            muted(ui, format!("No sound: {e}"));
         }
         // A refused play is answered with the reason.
         let refused = snap.acks.iter().rev().find_map(|a| match &a.result {
-            Err(e) if e.contains(&format!("record {} ", r.id.0)) && e.contains("can't be heard") => Some(e.clone()),
+            Err(e) if e.starts_with(&format!("Transmission #{} can't be played", r.id.0)) => Some(e.clone()),
             _ => None,
         });
         if let Some(e) = refused {
@@ -488,7 +470,7 @@ impl Inspector {
     }
 }
 
-/// An emitter: its name and how it was reached, its numbers, its decoder and its records.
+/// An emitter (a "frequency" on screen): what it is, its numbers, its decoder and its transmissions.
 fn emitter(ui: &mut egui::Ui, snap: &Snapshot, e: &EmitterView, sel: &mut Selection, h: &History) {
     ui.horizontal_wrapped(|ui| {
         let (name, ink) = match &e.headline {
@@ -496,22 +478,20 @@ fn emitter(ui: &mut egui::Ui, snap: &Snapshot, e: &EmitterView, sel: &mut Select
             None => ("Unknown", theme::INK2),
         };
         ui.label(RichText::new(name).size(17.0).color(ink));
-        muted(ui, format!("emitter {}", e.id.0));
     });
     if let Some(c) = &e.headline {
-        muted(ui, format!("named by its records' {} claims: {}", c.by.kind(), evidence_numbers(c)));
+        muted(ui, format!("by {}: {}", c.by.kind(), evidence_numbers(c)));
     }
     let stale = SystemTime::now().duration_since(e.last_seen).is_ok_and(|d| d.as_secs() > 60);
     grid(ui, "emitter", |ui| {
         field(ui, "Centre", mhz4(e.center_hz));
         field(ui, "Width", theme::value_unit(&format!("{:.1}", e.bandwidth_hz / 1e3), "kHz"));
-        field(ui, "Records", e.records.to_string());
+        field(ui, "Transmissions", e.records.to_string());
         field(ui, "On air", fmt::secs(e.on_time_s));
         field(ui, "Duty", theme::value_unit(&format!("{:.0}", e.duty * 100.0), "%"));
         field(ui, "First seen", format!("{} ({})", fmt::clock(e.first_seen), ago(e.first_seen)));
         let last = RichText::new(format!("{} ({})", fmt::clock(e.last_seen), ago(e.last_seen)));
         field(ui, "Last seen", if stale { last.color(theme::INK2) } else { last });
-        field(ui, "Confirmed", if e.confirmed { "yes" } else { "not yet" });
     });
     let decs: Vec<_> = snap.decoders.iter().filter(|d| d.emitter == e.id).collect();
     if !decs.is_empty() {
@@ -520,9 +500,9 @@ fn emitter(ui: &mut egui::Ui, snap: &Snapshot, e: &EmitterView, sel: &mut Select
             decoder(ui, d, h);
         }
     }
-    if snap.systems.systems.iter().any(|s| s.emitter == e.id) && ui.link("Its system").clicked() {
+    if snap.systems.systems.iter().any(|s| s.emitter == e.id) && ui.link("Trunked system").clicked() {
         *sel = Selection::System(e.id);
     }
-    section(ui, "Its records");
+    section(ui, "Recent transmissions");
     record_links(ui, snap.records.records.iter().filter(|r| r.emitter == Some(e.id)).map(|r| &**r), sel, 12);
 }

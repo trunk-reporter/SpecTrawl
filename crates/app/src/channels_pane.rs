@@ -12,16 +12,12 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, selected: &mut Selection) {
     ui.label(theme::label("Channels"));
     let rows = &snap.channels.channels;
     if rows.is_empty() {
-        ui.label(
-            RichText::new("none yet: a channel appears once a call on it measures as AM, or a decoder names it (ACARS)")
-                .italics()
-                .color(theme::INK2),
-        );
+        ui.label(RichText::new("None yet.").italics().color(theme::INK2));
         return;
     }
     egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
         egui::Grid::new("channels").striped(true).show(ui, |ui| {
-            for h in ["", "Channel", "Voice", "Data", "Carrier", "On air", "Peak", "Last heard", "What"] {
+            for h in ["", "Channel", "Voice", "Data", "Carrier", "On air", "Peak", "Last heard", "Type"] {
                 ui.label(theme::label(h));
             }
             ui.end_row();
@@ -30,11 +26,7 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, selected: &mut Selection) {
                 let is_selected = *selected == me;
                 theme::dot(ui, if c.open { theme::INK } else { theme::INK2 }, c.open);
                 let name = RichText::new(format!("{} {}", c.plan, c.name)).strong();
-                if ui
-                    .selectable_label(is_selected, name)
-                    .on_hover_text(format!("{} records; show them in the inspector", c.records.len()))
-                    .clicked()
-                {
+                if ui.selectable_label(is_selected, name).on_hover_text(fmt::count(c.records.len(), "transmission")).clicked() {
                     selected.toggle(me);
                 }
                 ui.label(c.voice.to_string());

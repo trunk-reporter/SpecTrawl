@@ -139,7 +139,7 @@ impl Store {
 
     /// Queues a history search, answered by [`Store::query_result`] with `seq`.
     pub fn query(&self, seq: u64, q: RecordQuery) -> Result<(), String> {
-        self.send(Op::Query(seq, q)).then_some(()).ok_or_else(|| "the store's queue is full".to_string())
+        self.send(Op::Query(seq, q)).then_some(()).ok_or_else(|| "History is busy: try again".to_string())
     }
 
     /// Waits until everything queued so far is written (tests, and closing).

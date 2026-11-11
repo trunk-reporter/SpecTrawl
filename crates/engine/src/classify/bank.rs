@@ -53,7 +53,7 @@ impl Detector for SyncBank {
 
     fn look(&self, w: &Window<'_>) -> Vec<Claim> {
         let Some(s) = rungs::sync_bank(w) else { return Vec::new() };
-        let label = if s.sync.detail.is_empty() { s.sync.protocol.to_string() } else { format!("{} {}", s.sync.protocol, s.sync.detail) };
+        let label = detect::sync::label(s.sync.protocol, s.sync.detail);
         let (tried, decoded) = s.fields.as_ref().map_or((0, 0), |f| (f.tried as u32, f.decoded as u32));
         let mut out = vec![Claim::new(
             label.clone(),

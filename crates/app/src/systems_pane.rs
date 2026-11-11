@@ -29,18 +29,18 @@ pub fn decoder_line(ui: &mut egui::Ui, d: &DecoderView) {
 pub fn show(ui: &mut egui::Ui, snap: &Snapshot, sel: &mut Selection) {
     ui.label(theme::label("Systems"));
     if snap.systems.systems.is_empty() {
-        ui.label(RichText::new("none yet: a system appears once a control channel's broadcasts are decoded").italics().color(theme::INK2));
+        ui.label(RichText::new("None yet.").italics().color(theme::INK2));
     }
     egui::Grid::new("systems").striped(true).show(ui, |ui| {
         if !snap.systems.systems.is_empty() {
-            for h in ["Mode", "Control", "Identity", "Records", "Last seen"] {
+            for h in ["Mode", "Control", "Identity", "Transmissions", "Last seen"] {
                 ui.label(theme::label(h));
             }
             ui.end_row();
         }
         for s in &snap.systems.systems {
             let me = Selection::System(s.emitter);
-            if ui.selectable_label(*sel == me, &s.mode).on_hover_text("Show this system in the inspector").clicked() {
+            if ui.selectable_label(*sel == me, &s.mode).on_hover_text("Show details").clicked() {
                 sel.toggle(me);
             }
             ui.label(fmt::mhz(s.control_hz));
@@ -53,12 +53,12 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, sel: &mut Selection) {
     ui.add_space(8.0);
     ui.label(theme::label("Decoders"));
     if snap.decoders.is_empty() {
-        ui.label(RichText::new("none running").italics().color(theme::INK2));
+        ui.label(RichText::new("None running.").italics().color(theme::INK2));
     }
     for d in &snap.decoders {
         let me = Selection::Emitter(d.emitter);
         let resp = ui.scope(|ui| decoder_line(ui, d)).response.interact(egui::Sense::click());
-        if resp.on_hover_text("Show its emitter in the inspector").clicked() {
+        if resp.on_hover_text("Show details").clicked() {
             sel.toggle(me);
         }
     }
@@ -68,11 +68,10 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot, sel: &mut Selection) {
 pub fn budget_line(snap: &Snapshot) -> String {
     let c = &snap.classify;
     if c.workers == 0 {
-        return "detector bank off".into();
+        return "Identification off".into();
     }
     let load = if c.looked_secs > 0.0 { 100.0 * c.work_secs / c.looked_secs } else { 0.0 };
-    format!(
-        "Looked at {} records ({} waiting, {} missed: IQ gone, {} dropped: queue full; {} survey, no IQ) · {} threads at {load:.0}% of real time",
-        c.looked, c.waiting, c.missed, c.dropped, c.survey, c.workers
-    )
+    let skipped = c.missed + c.dropped;
+    let skipped = if skipped > 0 { format!(", {skipped} skipped") } else { String::new() };
+    format!("Identification: {} checked, {} queued{skipped} · {load:.0}% of {} CPU threads", c.looked, c.waiting, c.workers)
 }

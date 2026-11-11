@@ -108,16 +108,19 @@ impl PagesPane {
         let monitors = snap.decoders.iter().filter(|d| d.mode == "POCSAG" || d.mode == "FLEX").count();
         ui.label(
             RichText::new(format!(
-                "{} of {} since the app started · {} running",
-                fmt::count(rows.len(), "page"),
-                self.pages.len(),
-                fmt::count(monitors, "pager monitor")
+                "{} · {} running",
+                if rows.len() == self.pages.len() {
+                    fmt::count(rows.len(), "page")
+                } else {
+                    format!("{} of {}", fmt::count(rows.len(), "page"), self.pages.len())
+                },
+                fmt::count(monitors, "pager decoder")
             ))
             .color(theme::INK2)
             .small(),
         );
         if self.pages.is_empty() {
-            ui.label(RichText::new("none yet: a page appears once a POCSAG or FLEX monitor decodes one").italics().color(theme::INK2));
+            ui.label(RichText::new("No pages yet.").italics().color(theme::INK2));
             return;
         }
         ui.separator();
@@ -152,7 +155,7 @@ impl PagesPane {
                     })
                     .response
                     .interact(Sense::click());
-                if resp.on_hover_text("Select its channel's emitter").clicked() {
+                if resp.on_hover_text("Show its frequency").clicked() {
                     sel.toggle(me);
                 }
             }

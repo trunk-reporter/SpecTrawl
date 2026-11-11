@@ -206,17 +206,17 @@ impl Player {
                     held => {
                         let why = match held {
                             Some(Err(e)) => e,
-                            _ => "its source is gone".into(),
+                            _ => "its receiver is closed".into(),
                         };
                         let Some(clip) = record.iq_clip.clone() else {
                             let slice = if record.slice_evicted {
-                                "its slice was evicted to keep under the disk cap"
+                                "its IQ recording was deleted to free disk space"
                             } else if record.open {
-                                "its slice is written when it closes"
+                                "its IQ recording is written when it ends"
                             } else {
-                                "it has no slice"
+                                "it has no IQ recording"
                             };
-                            return Err(format!("record {} can't be heard: {why}, and {slice}", record.id.0));
+                            return Err(format!("Transmission #{} can't be played: {why}, and {slice}", record.id.0));
                         };
                         self.send(Job::Slice { clip, mode, buf: buf.clone(), shared: shared.clone() })?;
                         (PlayFrom::Slice, None)
@@ -390,7 +390,7 @@ fn ring(
     let spec = ChannelSpec { source: source.id(), center_hz, bandwidth_hz, min_rate: bandwidth_hz, parent: None };
     match bus.subscribe(spec, Start::At(from), Priority::Listen, Box::new(consumer)) {
         Ok(info) => Ok(info.id),
-        Err(BusError::NotHeld { .. }) => Err("its start has left the ring".into()),
+        Err(BusError::NotHeld { .. }) => Err("its samples are no longer in the buffer".into()),
         Err(e) => Err(format!("{e:?}")),
     }
 }

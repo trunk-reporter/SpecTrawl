@@ -373,8 +373,10 @@ fn the_systems_tab_shows_the_p25_site_its_decoder_and_its_record_says_the_same()
         frame(&mut app, k);
         k += 1;
     }
-    let line = spectrawl_app::systems_pane::budget_line(&handle.latest());
-    assert!(line.starts_with("Identification: ") && !line.contains("skipped"), "{line}");
+    // No look lost its IQ (a full queue on a one-thread runner may drop some, which the line counts as skipped).
+    let s = handle.latest();
+    let line = spectrawl_app::systems_pane::budget_line(&s);
+    assert!(line.starts_with("Identification: ") && s.classify.missed == 0, "{line}");
     frame_ms.sort_by(|a, b| a.total_cmp(b));
     let max = *frame_ms.last().unwrap();
     assert!(max < 100.0, "a frame took {max:.1} ms");

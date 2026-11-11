@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use api::{Command, Receiver, RecordId, Row, SignalRecord};
+use api::{BandSpan, Command, Receiver, RecordId, Row, SignalRecord};
 use egui::{Color32, ColorImage, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, pos2, vec2};
 
 use crate::theme;
@@ -13,8 +13,12 @@ use crate::waterfall::{self, HIST_W, History, Lut, Pushed, ROWS, View};
 const SPECTRUM_H: f32 = 160.0;
 /// Room under the plot for the frequency labels.
 const LABELS_H: f32 = 14.0;
-/// Seconds between the waterfall's time marks.
-const MARK_SECS: f64 = 10.0;
+/// The band strip's height, between the spectrum and the waterfall (the guide's O14: 20 px).
+const STRIP_H: f32 = 20.0;
+/// Time marks no closer than this, in points (the guide's O13: 48 px).
+const MARK_MIN_GAP: f32 = 48.0;
+/// The steps a time mark may take, seconds.
+const MARK_STEPS: [f64; 6] = [5.0, 10.0, 15.0, 30.0, 60.0, 120.0];
 /// Each wheel notch narrows the window by this much.
 const WHEEL_ZOOM: f64 = 1.25;
 
@@ -108,20 +112,22 @@ impl Body {
         ui: &mut egui::Ui,
         r: &Receiver,
         records: &[Arc<SignalRecord>],
-        selected: &mut Option<RecordId>,
+        selected: &mut crate::selection::Selection,
+        bands: &[BandSpan],
         db_range: (f32, f32),
         paused: &mut bool,
         out: &mut Vec<Command>,
     ) {
         let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, theme::PLOT_BG);
+        painter.rect_filled(rect, 4.0, theme::WELL);
         let Some(span) = self.history.span() else {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "waiting for rows…", egui::FontId::proportional(13.0), theme::MUTED);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "waiting for rows…", egui::FontId::proportional(13.0), theme::INK2);
             return;
         };
         let spec = Rect::from_min_size(rect.min, vec2(rect.width(), SPECTRUM_H.min(rect.height())));
-        let wf = Rect::from_min_max(pos2(rect.left(), spec.bottom() + 1.0), rect.max);
+        let strip = Rect::from_min_size(pos2(rect.left(), spec.bottom() + 1.0), vec2(rect.width(), STRIP_H)).intersect(rect);
+        let wf = Rect::from_min_max(pos2(rect.left(), strip.bottom() + 1.0), rect.max);
         let spec_resp = ui.interact(spec, ui.id().with(("spectrum", r.id)), Sense::click_and_drag());
         let wf_resp = ui.interact(wf, ui.id().with(("waterfall", r.id)), Sense::click_and_drag());
 
@@ -135,23 +141,22 @@ impl Body {
         }
         self.zoom = view.zoom;
 
+        self.draw_strip(ui, &painter, strip, span, &view, bands, r.id);
         if wf.height() > 1.0 {
             self.draw_waterfall(ui, &painter, wf, span, view, r.letter);
-            let boxes = self.draw_records(&painter, wf, span, &view, records, *selected);
+            let boxes = self.draw_records(&painter, wf, span, &view, records, selected);
+            self.draw_time(&painter, wf, r);
             // A click (not a drag) picks the smallest box under the pointer, or clears the selection.
             if wf_resp.clicked()
                 && let Some(p) = wf_resp.interact_pointer_pos()
             {
-                *selected = boxes
-                    .iter()
-                    .filter(|(_, b)| b.expand(2.0).contains(p))
-                    .min_by(|a, b| a.1.area().total_cmp(&b.1.area()))
-                    .map(|(id, _)| *id);
+                let hit = boxes.iter().filter(|(_, b)| b.expand(2.0).contains(p)).min_by(|a, b| a.1.area().total_cmp(&b.1.area()));
+                *selected = hit.map_or(crate::selection::Selection::None, |(id, _)| crate::selection::Selection::Record(*id));
             }
         }
         self.draw_spectrum(&painter, spec, span, &view);
-        painter.hline(rect.x_range(), spec.bottom() + 0.5, Stroke::new(1.0, theme::BORDER));
-        painter.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+        painter.hline(rect.x_range(), spec.bottom() + 0.5, Stroke::new(1.0, theme::LINE));
+        painter.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::LINE), egui::StrokeKind::Inside);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -215,8 +220,8 @@ impl Body {
         let mut db = (db_min as f64 / step).ceil() * step;
         while db <= db_max as f64 {
             let y = y_of(db as f32);
-            painter.hline(plot.x_range(), y, Stroke::new(1.0, theme::GRID));
-            painter.text(pos2(plot.left() + 4.0, y - 1.0), egui::Align2::LEFT_BOTTOM, format!("{db:.dec$}"), font.clone(), theme::MUTED);
+            painter.hline(plot.x_range(), y, Stroke::new(1.0, theme::GRATICULE));
+            painter.text(pos2(plot.left() + 4.0, y - 1.0), egui::Align2::LEFT_BOTTOM, format!("{db:.dec$}"), font.clone(), theme::INK2);
             db += step;
         }
         // Frequency ticks, in MHz.
@@ -226,14 +231,14 @@ impl Body {
         let mut f = (lo / step).ceil() * step;
         while f <= hi {
             let x = view.hz_to_x(span, spec, f);
-            painter.vline(x, plot.y_range(), Stroke::new(1.0, theme::GRID));
+            painter.vline(x, plot.y_range(), Stroke::new(1.0, theme::GRATICULE));
             if x > spec.left() + 24.0 && x < spec.right() - 24.0 {
                 painter.text(
                     pos2(x, spec.bottom() - 2.0),
                     egui::Align2::CENTER_BOTTOM,
                     format!("{:.dec$}", f / 1e6),
                     font.clone(),
-                    theme::MUTED,
+                    theme::INK2,
                 );
             }
             f += step;
@@ -249,7 +254,7 @@ impl Body {
                 view.hz_to_x(span, spec, col_hz(c0 as f64 + (r.start + r.end) as f64 / 2.0)) + self.tune_drag
             })
             .collect();
-        for (line, colour, width) in [(&self.trace.hold, theme::MUTED, 1.0), (&self.trace.smooth, theme::ACCENT, 1.3)] {
+        for (line, colour, width) in [(&self.trace.hold, theme::INK2, 1.0), (&self.trace.smooth, theme::TRACE, 1.3)] {
             if line.len() != HIST_W {
                 continue;
             }
@@ -282,27 +287,94 @@ impl Body {
             mesh.add_rect_with_uv(screen, uv, Color32::WHITE);
         }
         painter.add(Shape::mesh(mesh));
+    }
 
-        // Time marks every 10 s at the left edge.
-        let row_h = wf.height() as f64 / ROWS as f64;
-        let every = MARK_SECS / self.history.secs_per_row();
-        let font = egui::FontId::monospace(10.0);
+    /// The waterfall's time, in the left gutter on chips (the guide's O2, O13): the clock time of the top row, then
+    /// marks back in time no closer than [`MARK_MIN_GAP`]. A retune clears the history, so no row spans one.
+    fn draw_time(&self, painter: &egui::Painter, wf: Rect, r: &Receiver) {
+        let secs_per_row = self.history.secs_per_row();
+        let px_per_sec = wf.height() as f64 / (ROWS as f64 * secs_per_row);
+        let Some(step) = MARK_STEPS.iter().copied().find(|s| (s * px_per_sec) as f32 >= MARK_MIN_GAP) else { return };
+        let chip = |pos: Pos2, text: String| {
+            let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), theme::INK2);
+            let rect = Rect::from_min_size(pos, galley.size() + vec2(8.0, 2.0));
+            painter.rect_filled(rect, 2.0, theme::WELL.gamma_multiply(0.9));
+            painter.galley(rect.min + vec2(4.0, 1.0), galley, theme::INK2);
+            rect
+        };
+        // The top row's clock time: the head, less the rows a pause has held back.
+        if let Some(head) = r.head_time {
+            let top = head - std::time::Duration::from_secs_f64(self.behind as f64 * secs_per_row);
+            chip(wf.left_top() + vec2(2.0, 2.0), format!("{} UTC", api::fmt::clock(top)));
+        }
         let mut k = 1;
         loop {
-            let y = wf.top() + (k as f64 * every * row_h) as f32;
-            if y.is_nan() || y >= wf.bottom() - 6.0 || k > 200 {
+            let y = wf.top() + (k as f64 * step * px_per_sec) as f32;
+            if !y.is_finite() || y >= wf.bottom() - 14.0 || k > 200 {
                 break;
             }
-            // A tick at the mark, its label just above it.
-            painter.hline(wf.left()..=wf.left() + 10.0, y, Stroke::new(1.0, theme::TEXT2));
-            painter.text(
-                pos2(wf.left() + 3.0, y - 1.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!("−{} s", k * MARK_SECS as u64),
-                font.clone(),
-                theme::TEXT2,
-            );
+            painter.hline(wf.left()..=wf.left() + 6.0, y, Stroke::new(1.0, theme::INK2));
+            chip(pos2(wf.left() + 8.0, y - 8.0), format!("−{} s", (k as f64 * step) as u64));
             k += 1;
+        }
+    }
+
+    /// The band plan as a strip on the frequency axis (the guide's O14): each allocation in view as a faint fill in an
+    /// identity colour with stronger edges, its name cut to fit and hidden when narrower than 24 points; overlapping
+    /// allocations stack in two rows. Hovering lists every allocation at the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_strip(
+        &self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        strip: Rect,
+        span: (f64, f64),
+        view: &View,
+        bands: &[BandSpan],
+        id: api::SourceId,
+    ) {
+        painter.rect_filled(strip, 0.0, theme::WELL);
+        let (lo, hi) = view.window(span);
+        let mut rows: [Vec<(f32, f32)>; 2] = [Vec::new(), Vec::new()];
+        let row_h = strip.height() / 2.0;
+        for b in bands.iter().filter(|b| b.hi_hz > lo && b.lo_hz < hi) {
+            let (x0, x1) = (view.hz_to_x(span, strip, b.lo_hz).max(strip.left()), view.hz_to_x(span, strip, b.hi_hz).min(strip.right()));
+            if x1 - x0 < 1.0 {
+                continue;
+            }
+            // The first row it fits in without overlapping; a third band over the same span is left out of the strip.
+            let Some(k) = (0..2).find(|&k| rows[k].iter().all(|&(a, z)| x1 <= a || x0 >= z)) else { continue };
+            rows[k].push((x0, x1));
+            let colour = theme::ID[service_colour(b.service)];
+            let r = Rect::from_x_y_ranges(x0..=x1, strip.top() + k as f32 * row_h..=strip.top() + (k + 1) as f32 * row_h - 1.0);
+            painter.rect_filled(r, 0.0, colour.gamma_multiply(0.15));
+            painter.vline(x0, r.y_range(), Stroke::new(1.0, colour.gamma_multiply(0.6)));
+            painter.vline(x1, r.y_range(), Stroke::new(1.0, colour.gamma_multiply(0.6)));
+            if x1 - x0 >= 24.0 {
+                let galley = painter.layout(b.name.to_string(), egui::FontId::proportional(10.5), theme::INK2, f32::INFINITY);
+                let room = x1 - x0 - 6.0;
+                let text = if galley.size().x <= room { b.name.to_string() } else { elide(b.name, room, galley.size().x) };
+                if !text.is_empty() {
+                    painter.text(
+                        pos2(x0 + 3.0, r.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        text,
+                        egui::FontId::proportional(10.5),
+                        theme::INK2,
+                    );
+                }
+            }
+        }
+        let resp = ui.interact(strip, ui.id().with(("band strip", id)), Sense::hover());
+        if let Some(p) = resp.hover_pos() {
+            let hz = view.x_to_hz(span, strip, p.x);
+            let here: Vec<String> = bands
+                .iter()
+                .filter(|b| b.lo_hz <= hz && hz < b.hi_hz)
+                .map(|b| format!("{} ({}): {:.3}–{:.3} MHz", b.name, b.service, b.lo_hz / 1e6, b.hi_hz / 1e6))
+                .collect();
+            let text = if here.is_empty() { "No allocation here in the band plan".to_string() } else { here.join("\n") };
+            resp.on_hover_text_at_pointer(text);
         }
     }
 
@@ -315,7 +387,7 @@ impl Body {
         span: (f64, f64),
         view: &View,
         records: &[Arc<SignalRecord>],
-        selected: Option<RecordId>,
+        selected: &crate::selection::Selection,
     ) -> Vec<(RecordId, Rect)> {
         let row_h = wf.height() / ROWS as f32;
         let behind = self.behind as isize;
@@ -337,8 +409,13 @@ impl Body {
             }
             let (y0, y1) = (wf.top() + top as f32 * row_h, wf.top() + (bottom + 1) as f32 * row_h);
             let b = Rect::from_min_max(pos2(x0, y0), pos2(x1, y1.max(y0 + 2.0))).intersect(wf);
-            let colour = if selected == Some(rec.id) { theme::SELECT } else { theme::RECORD.gamma_multiply(0.7) };
-            let stroke = Stroke::new(if selected == Some(rec.id) { 1.5 } else { 1.0 }, colour);
+            // The selected record in the accent, thicker; the rest of a selected emitter or system in the accent too.
+            let (colour, width) = match (selected.record() == Some(rec.id), selected.covers(rec)) {
+                (true, _) => (theme::ACCENT, 1.5),
+                (false, true) => (theme::ACCENT.gamma_multiply(0.7), 1.0),
+                _ => (theme::RECORD.gamma_multiply(0.7), 1.0),
+            };
+            let stroke = Stroke::new(width, colour);
             painter.line_segment([b.left_bottom(), b.right_bottom()], stroke);
             painter.line_segment([b.left_top(), b.left_bottom()], stroke);
             painter.line_segment([b.right_top(), b.right_bottom()], stroke);
@@ -354,7 +431,7 @@ impl Body {
     fn rebuild(&mut self, ctx: &egui::Context, letter: char, want: Built) {
         let Built { w, view, span } = want;
         let (c0, c1) = view.cols(span, HIST_W);
-        let mut px = vec![theme::PLOT_BG; w * ROWS];
+        let mut px = vec![theme::WELL; w * ROWS];
         self.cols.resize(w, 0.0);
         for (i, row) in self.history.iter().skip(self.behind).take(ROWS).enumerate() {
             waterfall::resample_max(&row.db[c0..c1], &mut self.cols);
@@ -434,9 +511,32 @@ fn runs(pts: impl Iterator<Item = Option<Pos2>>) -> Vec<Vec<Pos2>> {
     out
 }
 
+/// An identity colour for a band-plan service, stable for each service.
+fn service_colour(service: &str) -> usize {
+    service.bytes().fold(7usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) % theme::ID.len()
+}
+
+/// `name` cut to about `room` points (its full width is `full`), with an ellipsis; empty when nothing useful fits.
+fn elide(name: &str, room: f32, full: f32) -> String {
+    let keep = ((name.chars().count() as f32) * room / full) as usize;
+    if keep < 3 {
+        return String::new();
+    }
+    let mut out: String = name.chars().take(keep.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_band_name_is_cut_to_fit_with_an_ellipsis_or_dropped() {
+        // A third of its width keeps about a third of its characters.
+        assert_eq!(elide("800 MHz SMR/public safety", 50.0, 150.0), "800 MHz…");
+        assert_eq!(elide("Air band", 5.0, 60.0), "", "under three characters is no label");
+    }
 
     #[test]
     fn a_tuning_drag_tunes_once_by_its_own_movement() {

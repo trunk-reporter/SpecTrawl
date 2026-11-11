@@ -29,19 +29,32 @@ pub struct ReceiverPane {
     body: body::Body,
 }
 
+/// The steps of the linearity and sensitivity presets, 0 to this: what Airspy's and HydraSDR's own tools show. The api
+/// carries the setting as a fraction (0 to 1) for any backend; the popover shows steps.
+const PRESET_STEPS: u8 = 21;
+
+fn to_step(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * PRESET_STEPS as f32).round() as u8
+}
+
+fn from_step(step: u8) -> f32 {
+    step.min(PRESET_STEPS) as f32 / PRESET_STEPS as f32
+}
+
 /// The `Gain ⏷` popover's controls, synced from the snapshot while the popover is closed.
 #[derive(Debug, Clone, Copy)]
 struct GainDraft {
-    linearity: f32,
-    sensitivity: f32,
+    /// Preset steps, 0 to [`PRESET_STEPS`].
+    linearity: u8,
+    sensitivity: u8,
     manual: [u8; 3],
 }
 
 impl GainDraft {
     fn sync(&mut self, g: Option<GainSetting>) {
         match g {
-            Some(GainSetting::Linearity(v)) => self.linearity = v,
-            Some(GainSetting::Sensitivity(v)) => self.sensitivity = v,
+            Some(GainSetting::Linearity(v)) => self.linearity = to_step(v),
+            Some(GainSetting::Sensitivity(v)) => self.sensitivity = to_step(v),
             Some(GainSetting::Manual { lna, mixer, vga }) => self.manual = [lna, mixer, vga],
             Some(GainSetting::Auto) | None => {}
         }
@@ -65,7 +78,7 @@ impl ReceiverPane {
             centre_editing: false,
             span_mhz: (24.0, 1800.0),
             span_editing: false,
-            gain: GainDraft { linearity: 0.5, sensitivity: 0.5, manual: [8, 8, 8] },
+            gain: GainDraft { linearity: 13, sensitivity: 13, manual: [8, 8, 8] },
             gain_open: false,
             body: body::Body::new(),
         }
@@ -79,23 +92,25 @@ impl ReceiverPane {
     }
 
     /// `records`: this receiver's, from the snapshot; `selected` is shared with the records list.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         r: &Receiver,
         records: &[std::sync::Arc<api::SignalRecord>],
         decoders: &[api::DecoderView],
-        selected: &mut Option<api::RecordId>,
+        selected: &mut crate::selection::Selection,
+        bands: &[api::BandSpan],
         out: &mut Vec<Command>,
     ) {
-        self.header(ui, r, out);
+        self.header(ui, r, selected, out);
         status_lines(ui, r);
         // One sentence per decoder on this receiver, with its lamp (spec §5's status line and lamps).
         for d in decoders {
             crate::systems_pane::decoder_line(ui, d);
         }
         ui.add_space(4.0);
-        self.body.show(ui, r, records, selected, self.db_range, &mut self.paused, out);
+        self.body.show(ui, r, records, selected, bands, self.db_range, &mut self.paused, out);
     }
 
     pub fn last_status(&self) -> &Status {
@@ -140,15 +155,16 @@ impl ReceiverPane {
         self.db_range = range;
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, r: &Receiver, out: &mut Vec<Command>) {
+    fn header(&mut self, ui: &mut egui::Ui, r: &Receiver, selected: &mut crate::selection::Selection, out: &mut Vec<Command>) {
         ui.horizontal(|ui| {
             let letter = r.letter.to_string();
-            if r.letter == 'S' {
-                theme::chip(ui, &letter, theme::ACCENT, theme::BG);
-            } else {
-                theme::chip(ui, &letter, theme::CHIP_FOCUS_BG, theme::CHIP_FOCUS_FG);
+            // The letter is an identifier, not a state: a neutral chip.
+            theme::chip(ui, &letter, theme::CHIP, theme::INK);
+            // The receiver's name selects it: the inspector shows its ring, stage and decoders.
+            let me = crate::selection::Selection::Receiver(r.id);
+            if ui.selectable_label(*selected == me, &r.device.label).on_hover_text("Show this receiver in the inspector").clicked() {
+                selected.toggle(me);
             }
-            ui.label(egui::RichText::new(&r.device.label).strong());
             for mode in [Mode::Live, Mode::Sweep] {
                 if ui.add(egui::Button::new(mode_name(mode)).selected(r.mode == mode)).clicked() && r.mode != mode {
                     out.push(Command::SetMode { source: r.id, mode });
@@ -228,23 +244,33 @@ impl ReceiverPane {
         let (_, inner) = popover("Gain ⏷").ui(ui, |ui| {
             let mut set = None;
             // Each `SetGain` logs a line: send a drag's value once, when it ends.
-            if settled(&ui.add(egui::Slider::new(&mut g.linearity, 0.0..=1.0).text("Linearity"))) {
-                set = Some(GainSetting::Linearity(g.linearity));
+            // In the presets' own steps, 0 to 21, as Airspy's and HydraSDR's tools number them.
+            if settled(&ui.add(egui::Slider::new(&mut g.linearity, 0..=PRESET_STEPS).text("Linearity"))) {
+                set = Some(GainSetting::Linearity(from_step(g.linearity)));
             }
-            if settled(&ui.add(egui::Slider::new(&mut g.sensitivity, 0.0..=1.0).text("Sensitivity"))) {
-                set = Some(GainSetting::Sensitivity(g.sensitivity));
+            if settled(&ui.add(egui::Slider::new(&mut g.sensitivity, 0..=PRESET_STEPS).text("Sensitivity"))) {
+                set = Some(GainSetting::Sensitivity(from_step(g.sensitivity)));
             }
+            let now = match r.gain {
+                Some(GainSetting::Linearity(v)) => format!("Now: linearity step {}", to_step(v)),
+                Some(GainSetting::Sensitivity(v)) => format!("Now: sensitivity step {}", to_step(v)),
+                Some(GainSetting::Auto) => "Now: automatic (AGC)".into(),
+                Some(GainSetting::Manual { lna, mixer, vga }) => format!("Now: by hand, LNA {lna}, mixer {mixer}, VGA {vga}"),
+                None => "Now: the device's default".into(),
+            };
+            ui.label(egui::RichText::new(now).color(theme::INK2));
             if ui.button("Auto").clicked() {
                 set = Some(GainSetting::Auto);
             }
             ui.separator();
-            ui.label(egui::RichText::new("Manual").color(theme::MUTED));
+            ui.label(egui::RichText::new("Manual").color(theme::INK2));
             if r.caps.gain_stages.is_empty() {
-                ui.label(egui::RichText::new("This device has no hand-set stages.").color(theme::MUTED));
+                ui.label(egui::RichText::new("This device has no hand-set stages.").color(theme::INK2));
             }
             for (i, stage) in r.caps.gain_stages.iter().take(3).enumerate() {
                 ui.horizontal(|ui| {
-                    if settled(&ui.add(egui::DragValue::new(&mut g.manual[i]).range(0..=15))) {
+                    let range = stage.min.max(0.0) as u8..=stage.max.clamp(0.0, 255.0) as u8;
+                    if settled(&ui.add(egui::DragValue::new(&mut g.manual[i]).range(range))) {
                         let [lna, mixer, vga] = g.manual;
                         set = Some(GainSetting::Manual { lna, mixer, vga });
                     }
@@ -303,18 +329,18 @@ fn mode_name(m: Mode) -> &'static str {
 /// The status sentence coloured by health, then a muted clipping count when the input has clipped.
 fn status_lines(ui: &mut egui::Ui, r: &Receiver) {
     let colour = match r.status.health {
-        Health::Ok => theme::TEXT2,
-        Health::Warning => theme::SELECT,
-        Health::Lost => theme::ALERT,
+        Health::Ok => theme::INK2,
+        Health::Warning => theme::CAUTION,
+        Health::Lost => theme::ALARM,
     };
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(&r.status.text).color(colour));
         if let Some(reason) = &r.status.reason {
-            ui.label(egui::RichText::new(format!("· {reason}")).color(theme::MUTED));
+            ui.label(egui::RichText::new(format!("· {reason}")).color(theme::INK2));
         }
     });
     if r.ring.overloads > 0 {
-        ui.label(egui::RichText::new(format!("clipping ({})", r.ring.overloads)).small().color(theme::MUTED));
+        ui.label(egui::RichText::new(format!("clipping ({})", r.ring.overloads)).small().color(theme::INK2));
     }
 }
 
@@ -331,5 +357,19 @@ mod tests {
         // A click on the track, or a typed value.
         assert!(edit_settled(true, false, false));
         assert!(!edit_settled(false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod gain_tests {
+    use super::*;
+
+    #[test]
+    fn preset_steps_round_trip_through_the_fraction_the_api_carries() {
+        for step in 0..=PRESET_STEPS {
+            assert_eq!(to_step(from_step(step)), step);
+        }
+        assert_eq!(to_step(13.0 / 21.0), 13);
+        assert_eq!(to_step(1.5), PRESET_STEPS);
     }
 }

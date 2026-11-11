@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use sdr_core::{Capabilities, DeviceInfo, GainSetting};
 
 use crate::audio::AudioView;
-use crate::classify::{ChannelsView, ClassifyView, DecoderView, SystemsView, WorkerMode, WorkerView};
+use crate::classify::{BandSpan, CatalogueEntry, ChannelsView, ClassifyView, DecoderView, SystemsView, WorkerMode, WorkerView};
 use crate::command::Ack;
 use crate::records::{QueryResult, RecordsView, StoreView};
 use crate::timeline::{Row, SegmentId};
@@ -39,6 +39,10 @@ pub struct Snapshot {
     /// The decoder workers running, and the modes the installed workers offer.
     pub workers: Vec<WorkerView>,
     pub worker_modes: Arc<Vec<WorkerMode>>,
+    /// Every mode the engine can name or decode (the same `Arc` in every snapshot).
+    pub catalogue: Arc<Vec<CatalogueEntry>>,
+    /// The band plan's allocations (the same `Arc` in every snapshot).
+    pub band_plan: Arc<Vec<BandSpan>>,
 }
 
 impl Snapshot {
@@ -61,6 +65,8 @@ impl Snapshot {
             channels: Arc::new(ChannelsView::default()),
             workers: Vec::new(),
             worker_modes: Arc::new(Vec::new()),
+            catalogue: Arc::new(Vec::new()),
+            band_plan: Arc::new(Vec::new()),
         }
     }
 }
@@ -174,5 +180,35 @@ pub struct BusView {
 pub struct LogEntry {
     pub n: u64,
     pub receiver: Option<char>,
+    pub kind: LogKind,
     pub text: String,
+}
+
+/// What a log line narrates (spec §5's Log slot), so the log can be filtered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogKind {
+    /// A device opened, closed, lost, or enumerated; the budget changed.
+    Device,
+    /// A receiver retuned, changed mode or gain, or started a sweep.
+    Tune,
+    /// The bus shed a channel, or a consumer panicked.
+    Bus,
+    /// A claim changed an emitter's headline (or named it).
+    Headline,
+    /// A command failed.
+    Error,
+}
+
+impl LogKind {
+    pub const ALL: [LogKind; 5] = [LogKind::Device, LogKind::Tune, LogKind::Bus, LogKind::Headline, LogKind::Error];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LogKind::Device => "Devices",
+            LogKind::Tune => "Tuning",
+            LogKind::Bus => "Bus",
+            LogKind::Headline => "Names",
+            LogKind::Error => "Errors",
+        }
+    }
 }

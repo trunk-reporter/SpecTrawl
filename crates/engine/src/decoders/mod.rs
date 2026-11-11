@@ -72,6 +72,10 @@ pub trait Decoder: Send {
     fn telemetry(&self) -> Telemetry;
     /// One sentence.
     fn summary(&self) -> String;
+    /// The newest calls or pages it decoded, one line each, newest last (none by default).
+    fn recent(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// The claim the decoder makes about its signal, if it has locked.
     fn claim(&self) -> Option<Claim>;
 }
@@ -91,6 +95,10 @@ struct Attached {
     stop: AtomicBool,
     ended: AtomicBool,
     view: Mutex<(Telemetry, String)>,
+    /// The decoder's newest calls or pages.
+    recent: Mutex<Vec<String>>,
+    /// The fed channel's power, dBFS, smoothed (NaN before the first samples).
+    level_dbfs: Mutex<f32>,
     channel: Mutex<Option<ChannelId>>,
 }
 
@@ -159,6 +167,9 @@ impl DecoderBank {
                     summary,
                     blocks_ok: t.blocks_ok,
                     blocks_bad: t.blocks_bad,
+                    level_dbfs: Some(*a.level_dbfs.lock()).filter(|v| v.is_finite()),
+                    channel: *a.channel.lock(),
+                    recent: a.recent.lock().clone(),
                 }
             })
             .collect()
@@ -215,8 +226,11 @@ fn channel_for(want: &Want, bandwidth_hz: f64) -> (f64, f64, Priority) {
     match want {
         Want::P25Control => (P25_WIDTH_HZ, P25_RATE, Priority::TrunkControl),
         Want::Monitor { protocol, .. } => {
-            let width = (1.25 * bandwidth_hz).clamp(MONITOR_MIN_WIDTH_HZ, MONITOR_MAX_WIDTH_HZ);
-            let priority = if matches!(*protocol, "POCSAG" | "FLEX") { Priority::PagerMonitor } else { Priority::EmitterDecoder };
+            let pager = matches!(*protocol, "POCSAG" | "FLEX");
+            // A pager gets its whole 25 kHz channel: a 4-level FLEX signal clipped to its measured width (a record often
+            // catches only part of it) loses its outer levels.
+            let width = if pager { PAGER_WIDTH_HZ } else { (1.25 * bandwidth_hz).clamp(MONITOR_MIN_WIDTH_HZ, MONITOR_MAX_WIDTH_HZ) };
+            let priority = if pager { Priority::PagerMonitor } else { Priority::EmitterDecoder };
             (width, MONITOR_RATE, priority)
         }
     }
@@ -227,6 +241,8 @@ fn channel_for(want: &Want, bandwidth_hz: f64) -> (f64, f64, Priority) {
 const MONITOR_MIN_WIDTH_HZ: f64 = 12.5e3;
 const MONITOR_MAX_WIDTH_HZ: f64 = 30e3;
 const MONITOR_RATE: f64 = 48e3;
+/// A pager monitor's channel: a paging channel's whole 25 kHz.
+const PAGER_WIDTH_HZ: f64 = 25e3;
 
 /// A decoder follows its emitter: one tuned more than this from where the emitter now is (1.5 kHz, or 15 % of its
 /// width) is detached and attached again there. An emitter's first records can put it kHz off (a fading FLEX pager's
@@ -263,6 +279,13 @@ fn manage(shared: Arc<Shared>, book: Arc<RecordBook>, bus: Arc<ChannelBus>, sour
                 list.push((r, w));
             }
         }
+        // Where each emitter's decoders belong: the newest record whose claim asks for that mode (the look that synced
+        // or decoded it saw the signal there). An emitter's own centre is an average of its records and can sit between
+        // two channels, or drift off one, so a decoder never tunes to it.
+        let at: HashMap<(EmitterId, &'static str), (f64, f64)> = wanted
+            .iter()
+            .flat_map(|(em, list)| list.iter().map(move |(r, w)| ((*em, w.mode()), (r.center_hz(), r.bandwidth_hz()))))
+            .collect();
         let mut attached = shared.attached.lock();
         // The newest time the book has seen: idleness is measured on the records' own clock.
         let now = view.records.iter().map(|r| r.t_end).max();
@@ -277,20 +300,22 @@ fn manage(shared: Arc<Shared>, book: Arc<RecordBook>, bus: Arc<ChannelBus>, sour
             }
             let idle = if matches!(a.mode, "POCSAG" | "FLEX") { PAGER_IDLE } else { IDLE };
             let quiet = now.is_some_and(|now| now.duration_since(*last).unwrap_or_default() > idle);
-            let moved = view.emitters.iter().find(|e| e.id == a.emitter).filter(|e| moved(a.center_hz, e.center_hz, e.bandwidth_hz));
-            let keep = !a.ended.load(Ordering::Relaxed) && !quiet && moved.is_none() && sources.lock().contains_key(&a.source);
+            let moved = at.get(&(a.emitter, a.mode)).copied().filter(|&(c, bw)| moved(a.center_hz, c, bw));
+            // A retune leaves a decoder outside its receiver's span: it ends with the span it was attached in.
+            let in_span = sources.lock().get(&a.source).is_some_and(|src| {
+                let seg = src.current_segment();
+                (a.center_hz - seg.center_hz).abs() < seg.sample_rate / 2.0
+            });
+            let keep = !a.ended.load(Ordering::Relaxed) && !quiet && moved.is_none() && in_span;
             if !keep {
                 a.stop.store(true, Ordering::Relaxed);
                 if let Some(ch) = a.channel.lock().take() {
                     bus.unsubscribe(ch);
                 }
                 match moved {
-                    Some(e) => log::info!(
-                        "decoder {} at {:.4} MHz detached: its emitter is at {:.4} MHz",
-                        a.mode,
-                        a.center_hz / 1e6,
-                        e.center_hz / 1e6
-                    ),
+                    Some((c, _)) => {
+                        log::info!("decoder {} at {:.4} MHz detached: its signal is now at {:.4} MHz", a.mode, a.center_hz / 1e6, c / 1e6)
+                    }
                     None => log::info!("decoder {} at {:.4} MHz detached", a.mode, a.center_hz / 1e6),
                 }
             }
@@ -305,9 +330,8 @@ fn manage(shared: Arc<Shared>, book: Arc<RecordBook>, bus: Arc<ChannelBus>, sour
             }
             let Some(src) = sources.lock().get(&r.source).cloned() else { continue };
             let Some(stage) = bus.stage(src.id()) else { continue };
-            let emitter = view.emitters.iter().find(|e| e.id == em);
-            let center_hz = emitter.map_or(r.center_hz(), |e| e.center_hz);
-            let bandwidth_hz = emitter.map_or(r.bandwidth_hz(), |e| e.bandwidth_hz);
+            // On the signal as the claiming record saw it, not the emitter's average (see `at` above).
+            let (center_hz, bandwidth_hz) = (r.center_hz(), r.bandwidth_hz());
             let title = match &want {
                 Want::P25Control => mode.to_string(),
                 Want::Monitor { label, .. } => label.clone(),
@@ -328,6 +352,8 @@ fn manage(shared: Arc<Shared>, book: Arc<RecordBook>, bus: Arc<ChannelBus>, sour
                     format!("{title} {:.4} MHz: searching", center_hz / 1e6),
                 )),
                 channel: Mutex::new(None),
+                level_dbfs: Mutex::new(f32::NAN),
+                recent: Mutex::new(Vec::new()),
             });
             let feed = || -> Box<dyn Consumer> {
                 let decoder: Box<dyn Decoder> = match &want {
@@ -402,6 +428,9 @@ struct Feed {
     last: Option<(RecordId, Claim)>,
 }
 
+/// The time constant of a decoder's level, seconds.
+const LEVEL_SECS: f32 = 1.0;
+
 /// Deliveries remembered to place a decode: more than a monitor's longest block (FLEX's 4 s) lags.
 const PLACE_SECS: f64 = 12.0;
 
@@ -411,6 +440,19 @@ impl Feed {
         let i = self.deliveries.partition_point(|d| d.0 <= k).checked_sub(1)?;
         let (fed, first, len) = self.deliveries[i];
         (k < fed + len as u64).then(|| first + ((k - fed) as f64 * self.hop as f64 / len as f64) as u64)
+    }
+
+    /// Folds a block's power into the attached decoder's level: an average with a time constant of about a second.
+    fn measure_level(&self, samples: &[Complex32]) {
+        if samples.is_empty() {
+            return;
+        }
+        let power = samples.iter().map(|x| x.norm_sqr()).sum::<f32>() / samples.len() as f32;
+        let db = 10.0 * power.max(1e-20).log10();
+        let block_secs = (self.hop as f64 / self.input_rate) as f32;
+        let k = (block_secs / LEVEL_SECS).clamp(0.0, 1.0);
+        let mut level = self.attached.level_dbfs.lock();
+        *level = if level.is_finite() { *level + k * (db - *level) } else { db };
     }
 
     fn set_claim(&mut self, id: RecordId) {
@@ -441,6 +483,11 @@ impl Consumer for Feed {
                 }
                 self.decoder.feed(samples);
                 *self.attached.view.lock() = (self.decoder.telemetry(), self.decoder.summary());
+                let recent = self.decoder.recent();
+                if *self.attached.recent.lock() != recent {
+                    *self.attached.recent.lock() = recent;
+                }
+                self.measure_level(samples);
                 match self.decoder.take_heard() {
                     Some(heard) => {
                         let margin = (crate::classify::LEAD.as_secs_f64() * self.input_rate) as u64;

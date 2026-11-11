@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use api::{Claim, Evidence, Identity, Lamp};
 use detect::bank::{self as rungs, Window};
+use detect::flex::FlexFrame;
+use detect::flex_join::{FragmentJoiner, TIMEOUT_FRAMES, frame_index};
 use sdr_core::Complex32;
 
 use super::{Decoder, Telemetry};
@@ -46,8 +48,11 @@ pub struct Monitor {
     calls: VecDeque<String>,
     pages: VecDeque<String>,
     pages_total: u64,
-    /// FLEX frames already counted: (cycle, frame).
-    flex_seen: VecDeque<(u8, u8)>,
+    /// FLEX: frames already taken (blocks overlap), and long messages' fragments until their last one comes.
+    joiner: FragmentJoiner,
+    /// FLEX: the newest frame taken, (index in the hour, sample fed), to give up on a message's missing fragments
+    /// when the channel falls quiet and no later frame comes to time them out.
+    last_frame: Option<(u32, u64)>,
     /// POCSAG pages kept, as `pages` shows them.
     pocsag_seen: VecDeque<detect::pocsag::Page>,
     capplus_repeater: Option<u8>,
@@ -77,7 +82,8 @@ impl Monitor {
             calls: VecDeque::new(),
             pages: VecDeque::new(),
             pages_total: 0,
-            flex_seen: VecDeque::new(),
+            joiner: FragmentJoiner::new(),
+            last_frame: None,
             pocsag_seen: VecDeque::new(),
             capplus_repeater: None,
             capplus_rest: None,
@@ -139,28 +145,17 @@ impl Monitor {
         let mut locked = false;
         let mut synced = false;
         if self.protocol == "FLEX" {
+            let block_secs = w.raw.len() as f64 / w.fs;
             for f in detect::flex::decode(w.raw, w.fs) {
                 synced = true;
-                if self.flex_seen.contains(&(f.cycle, f.frame)) {
+                // A frame the block cuts off is left for the next block, which holds it whole (blocks overlap by more
+                // than a frame): taken here, its pages would be cut short and the whole copy dropped as seen.
+                if f.at as f64 / w.fs + detect::flex::FRAME_AFTER_SYNC1_SECS > block_secs {
                     continue;
                 }
-                self.flex_seen.push_back((f.cycle, f.frame));
-                self.heard.push(start + f.at as u64);
-                while self.flex_seen.len() > 64 {
-                    self.flex_seen.pop_front();
-                }
-                self.tried += 1;
-                self.decoded += 1;
-                locked = true;
-                *self.kinds.entry("frame".into()).or_default() += 1;
-                self.label = format!("FLEX {}", f.mode());
-                for p in &f.pages {
-                    if Self::push(&mut self.pages, p.summary()) {
-                        self.pages_total += 1;
-                        *self.kinds.entry("page".into()).or_default() += 1;
-                    }
-                }
+                locked |= self.take_flex(&f, start + f.at as u64);
             }
+            self.expire_flex(start + x.len() as u64);
         } else if let Some(s) = rungs::sync_bank(&w).filter(|s| s.sync.protocol == self.protocol) {
             synced = true;
             self.label =
@@ -218,6 +213,49 @@ impl Monitor {
         };
     }
 
+    /// Takes FLEX frame `f`, whose sync ends at sample `at`, unless it was taken already. Fragments of a long message
+    /// wait in the joiner; whole messages are kept as pages. True if the frame is new.
+    fn take_flex(&mut self, f: &FlexFrame, at: u64) -> bool {
+        if !self.joiner.new_frame(f.cycle, f.frame) {
+            return false;
+        }
+        self.heard.push(at);
+        self.last_frame = Some((frame_index(f.cycle, f.frame), at));
+        self.tried += 1;
+        self.decoded += 1;
+        *self.kinds.entry("frame".into()).or_default() += 1;
+        self.label = format!("FLEX {}", f.mode());
+        let mut whole = Vec::new();
+        for p in &f.pages {
+            whole.extend(self.joiner.push(p.clone(), f.cycle, f.frame));
+        }
+        whole.extend(self.joiner.expire(f.cycle, f.frame));
+        self.keep_flex(whole);
+        true
+    }
+
+    /// Gives up on fragments that are overdue at sample `now`: frames come every 1.875 s whether or not a transmitter
+    /// sends them, so the frame number is known from the time even on a quiet channel.
+    fn expire_flex(&mut self, now: u64) {
+        let Some((idx, at)) = self.last_frame.filter(|_| self.joiner.pending() > 0) else { return };
+        let frames = (now.saturating_sub(at) as f64 / self.rate / detect::flex::FRAME_SECS) as u32;
+        if frames <= TIMEOUT_FRAMES {
+            return;
+        }
+        let idx = idx + frames;
+        let released = self.joiner.expire((idx / 128 % 15) as u8, (idx % 128) as u8);
+        self.keep_flex(released);
+    }
+
+    fn keep_flex(&mut self, pages: Vec<detect::flex::Page>) {
+        for p in pages {
+            if Self::push(&mut self.pages, p.summary()) {
+                self.pages_total += 1;
+                *self.kinds.entry("page".into()).or_default() += 1;
+            }
+        }
+    }
+
     /// The newest calls (DMR, NXDN) or pages (POCSAG, FLEX), newest last.
     pub fn calls(&self) -> impl Iterator<Item = &String> {
         self.calls.iter()
@@ -269,6 +307,10 @@ impl Decoder for Monitor {
         Some(std::mem::take(&mut self.heard))
     }
 
+    fn recent(&self) -> Vec<String> {
+        self.calls.iter().chain(self.pages.iter()).cloned().collect()
+    }
+
     fn telemetry(&self) -> Telemetry {
         Telemetry {
             lamp: self.lamp,
@@ -294,8 +336,10 @@ impl Decoder for Monitor {
             if self.protocol == "FLEX" {
                 s.push_str(&format!(" in {} frames", self.decoded));
             }
-            if let Some(p) = self.pages.back() {
-                s.push_str(&format!(" | {p}"));
+            // Counts only: the pages themselves are people's, and this sentence is shown and logged everywhere.
+            let damaged = self.pages.iter().filter(|p| p.contains("[damaged]")).count();
+            if damaged > 0 {
+                s.push_str(&format!(", {damaged} of the last {} damaged", self.pages.len()));
             }
             return s;
         }
@@ -329,5 +373,84 @@ impl Decoder for Monitor {
                 identity: self.identity(),
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The committed synthetic FLEX slice: four 3200/4 frames carrying five invented pages, 50 kS/s.
+    fn synthetic() -> Vec<Complex32> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/small/flex_synthetic_929.6125.sigmf-data");
+        let raw = std::fs::read(path).expect("the synthetic FLEX slice (testdata/small)");
+        raw.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| Complex32::new(f32::from_le_bytes(c[0..4].try_into().unwrap()), f32::from_le_bytes(c[4..8].try_into().unwrap())))
+            .collect()
+    }
+
+    #[test]
+    fn a_flex_frame_cut_short_by_a_block_is_taken_whole_from_the_next() {
+        // Blocks are 4 s, every 2 s: the second frame (about 2.1 s in) is cut off by the first block's end and whole in
+        // the second. A monitor that kept the first copy it saw printed its pages damaged.
+        for lead_secs in [0.0, 0.5, 1.0, 1.5] {
+            let pages = monitor_pages(lead_secs);
+            assert_eq!(pages.len(), 5, "{lead_secs} s lead: every page, once: {} lines", pages.len());
+            let damaged = pages.iter().filter(|p| p.contains("[damaged]")).count();
+            assert_eq!(damaged, 0, "{lead_secs} s lead: {damaged} of 5 pages damaged");
+            assert!(pages.iter().any(|p| p.ends_with(": END OF SYNTHETIC SLICE")));
+        }
+    }
+
+    fn fragment(capcode: u64, fragment: u8, continued: bool, text: &str) -> detect::flex::Page {
+        detect::flex::Page { capcode, phase: 'A', kind: "alpha", text: text.into(), damaged: false, continued, fragment, message_no: 1 }
+    }
+
+    fn frame(cycle: u8, frame: u8, pages: Vec<detect::flex::Page>) -> FlexFrame {
+        FlexFrame { at: 0, baud: 3200, levels: 4, cycle, frame, block_ok: [0; 11], block_off: [0.0; 11], soft_words: 0, pages }
+    }
+
+    #[test]
+    fn a_long_flex_message_sent_in_fragments_is_one_page() {
+        let mut m = Monitor::new("FLEX", "FLEX", 929.6125e6, 25e3);
+        m.configure(50e3);
+        let fs = 50e3 * detect::flex::FRAME_SECS;
+        assert!(m.take_flex(&frame(3, 40, vec![fragment(1_234_567, 3, true, "FIRST HALF ")]), 0));
+        assert!(m.recent().is_empty(), "a first fragment waits for the rest");
+        // The overlapping block decodes the same frame again.
+        assert!(!m.take_flex(&frame(3, 40, vec![fragment(1_234_567, 3, true, "FIRST HALF ")]), 0));
+        assert!(m.take_flex(&frame(3, 41, vec![fragment(1_234_567, 0, false, "SECOND HALF")]), fs as u64));
+        assert_eq!(m.recent(), vec!["001234567 A alpha: FIRST HALF SECOND HALF".to_string()]);
+        assert_eq!(m.pages_total, 1);
+    }
+
+    #[test]
+    fn a_message_whose_end_never_comes_is_shown_damaged_once_the_channel_is_quiet() {
+        let mut m = Monitor::new("FLEX", "FLEX", 929.6125e6, 25e3);
+        m.configure(50e3);
+        let frame_samples = 50e3 * detect::flex::FRAME_SECS;
+        assert!(m.take_flex(&frame(14, 127, vec![fragment(1_234_567, 3, true, "CUT OFF")]), 0));
+        // No more frames: the transmitter has gone quiet. Time alone gives the message up, across the hour's wrap.
+        m.expire_flex((frame_samples * TIMEOUT_FRAMES as f64) as u64);
+        assert!(m.recent().is_empty(), "not overdue yet");
+        m.expire_flex((frame_samples * (TIMEOUT_FRAMES + 2) as f64) as u64);
+        let lines = m.recent();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("[damaged]") && lines[0].ends_with("CUT OFF …"), "{lines:?}");
+    }
+
+    /// The monitor's lines for the synthetic slice after `lead_secs` of silence, then 4 s more (a live channel goes on).
+    fn monitor_pages(lead_secs: f64) -> Vec<String> {
+        let mut x = vec![Complex32::new(0.0, 0.0); (lead_secs * 50e3) as usize];
+        x.extend(synthetic());
+        x.extend(std::iter::repeat_n(Complex32::new(0.0, 0.0), 200_000));
+        let mut m = Monitor::new("FLEX", "FLEX", 929.6125e6, 15e3);
+        m.configure(50e3);
+        for chunk in x.chunks(500) {
+            m.feed(chunk);
+        }
+        m.recent()
     }
 }

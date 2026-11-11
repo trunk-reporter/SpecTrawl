@@ -245,3 +245,28 @@ fn acars_corrects_a_weak_block_by_parity_and_bcs() {
     assert!(b.crc_ok && b.parity_errors == 2, "{b:?}");
     assert_eq!((b.registration(), b.label.as_str(), b.flight()), ("N365NB", "_\u{7f}", Some("NW2320")));
 }
+
+#[test]
+fn a_smart_meter_frame_is_802_15_4g_fsk_at_150_kbps() {
+    // One Wi-SUN frame from the 902–928 MHz mesh (R2, 2026-11-10), which the shape rules called "Wideband".
+    let Some((x, fs)) = common::capture("923.9953MHz_802.15.4g_FSK_150k") else { return };
+    let f = detect::sunfsk::detect(&x, fs).expect("the frame's preamble and SFD");
+    assert_eq!((f.rate, f.coded, f.uncoded), (150e3, 1, 0), "{f:?}");
+    let w = detect::bank::Window::new(&x, fs, 200e3, detect::Hints { snr_db: Some(30.0), am_band: false });
+    let i = detect::bank::sun_fsk(&w).expect("identified");
+    assert_eq!((i.label.as_str(), i.protocol), ("802.15.4g FSK 150 kb/s", Some("802.15.4g")));
+}
+
+#[test]
+fn a_weak_p25_control_channel_is_named_by_the_weak_pass() {
+    // 851.1625 MHz on air (R2, 2026-11-11): 11 dB, only its 4 kHz core over the detector's threshold, so its records were
+    // 3.7 kHz wide and named by nothing. The exact sync search still finds nothing to confirm in it.
+    let Some((x, fs)) = common::capture("851.1625MHz_P25_Phase_1_weak") else { return };
+    assert!(detect::sync::best(&detect::sync_hits(&x, fs, detect::NARROW_CUTOFF_HZ)).is_none());
+    let c = detect::classify(&x, fs, 3_700.0);
+    assert_eq!(c.label, "P25 Phase 1");
+    let f = c.fields.expect("fields");
+    assert_eq!(f.id.as_deref(), Some("NAC 0x344"));
+    assert_eq!(f.kinds.first().map(|k| k.0.as_str()), Some("TSDU"), "{:?}", f.kinds);
+    assert!(f.decoded >= 4, "decoded {}/{}", f.decoded, f.tried);
+}

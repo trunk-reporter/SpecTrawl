@@ -22,16 +22,19 @@ pub mod timeline;
 
 pub use audio::{AudioMode, AudioView, PlayFrom, PlayId, PlayState, PlayTarget, PlayTo, PlayView};
 pub use classify::{
-    ChannelRow, ChannelsView, ClassifyView, DecoderView, Lamp, SystemRow, SystemsView, WorkerId, WorkerMessage, WorkerMode, WorkerView,
+    BandSpan, CatalogueEntry, ChannelRow, ChannelsView, ClassifyView, DecoderView, Domain, Lamp, Reach, SystemRow, SystemsView, WorkerId,
+    WorkerMessage, WorkerMode, WorkerView,
 };
 pub use command::{Ack, Command, CommandReceiver, CommandSender, Outcome, command_channel};
 pub use handle::Handle;
 pub use records::{
     Claim, EmitterId, EmitterView, Evidence, Identity, IqClip, Note, PositionKind, QueryResult, RecordId, RecordQuery, RecordsView, Role,
-    SignalRecord, StoreView, headline,
+    SignalRecord, Standing, StoreView, headline, standing,
 };
 pub use sdr_core::{Capabilities, DeviceInfo, GainSetting};
-pub use snapshot::{BusView, ConsumerView, DeviceEntry, Health, LogEntry, Receiver, RingView, Snapshot, StageView, Status, SweepView};
+pub use snapshot::{
+    BusView, ConsumerView, DeviceEntry, Health, LogEntry, LogKind, Receiver, RingView, Snapshot, StageView, Status, SweepView,
+};
 pub use timeline::{Boundary, Row, Segment, SegmentId};
 
 /// Identifies a source within the budget.

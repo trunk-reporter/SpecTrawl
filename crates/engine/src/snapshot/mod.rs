@@ -2,6 +2,7 @@
 
 mod build;
 mod devices;
+mod narrate;
 pub mod status;
 
 use std::any::Any;
@@ -12,7 +13,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use api::{Ack, Command, CommandReceiver, Handle, LogEntry, Snapshot, command_channel};
+use api::{Ack, Command, CommandReceiver, Handle, LogEntry, LogKind, Snapshot, command_channel};
 use arc_swap::ArcSwap;
 use sdr_core::Backend;
 
@@ -35,7 +36,7 @@ pub struct PublisherConfig {
 
 impl Default for PublisherConfig {
     fn default() -> Self {
-        PublisherConfig { period: Duration::from_millis(50), rows_per_snapshot: 48, acks_kept: 64, log_kept: 200 }
+        PublisherConfig { period: Duration::from_millis(50), rows_per_snapshot: 48, acks_kept: 64, log_kept: 500 }
     }
 }
 
@@ -47,10 +48,10 @@ pub(crate) struct Log {
 }
 
 impl Log {
-    pub fn push(&mut self, receiver: Option<char>, text: String) {
+    pub fn push(&mut self, receiver: Option<char>, kind: LogKind, text: String) {
         self.n += 1;
         log::info!("{text}");
-        self.lines.push_back(Arc::new(LogEntry { n: self.n, receiver, text }));
+        self.lines.push_back(Arc::new(LogEntry { n: self.n, receiver, kind, text }));
         while self.lines.len() > self.kept {
             self.lines.pop_front();
         }
@@ -63,6 +64,9 @@ struct Publisher {
     cfg: PublisherConfig,
     acks: VecDeque<Ack>,
     log: Log,
+    narrator: narrate::Narrator,
+    catalogue: Arc<Vec<api::CatalogueEntry>>,
+    band_plan: Arc<Vec<api::BandSpan>>,
     watch: Watch,
     version: u64,
     /// The systems view and the records view version it was built from.
@@ -92,6 +96,9 @@ pub fn spawn_with_guard(engine: Engine, backends: Vec<Box<dyn Backend>>, cfg: Pu
         cfg,
         acks: VecDeque::new(),
         log,
+        narrator: narrate::Narrator::default(),
+        catalogue: Arc::new(crate::catalogue::entries()),
+        band_plan: Arc::new(crate::catalogue::band_plan()),
         watch: Watch::default(),
         version: 0,
         swap: swap.clone(),
@@ -174,6 +181,9 @@ impl Publisher {
                 None => Err("history search needs the record store".into()),
             },
             Command::Play { target, mode, gain, to } => engine.play(target, mode, gain, to).map(api::Outcome::Playing),
+            Command::SaveIq { record } => {
+                engine.records().save_iq(record).map(|(path, pending)| api::Outcome::SavedIq { record, path, pending })
+            }
             Command::StopPlay(id) => {
                 if engine.stop_play(id) {
                     Ok(api::Outcome::Done)
@@ -195,7 +205,7 @@ impl Publisher {
         }))
         .unwrap_or_else(|payload| Err(format!("{name} panicked: {}", panic_text(payload.as_ref()))));
         if let Err(e) = &result {
-            self.log.push(target, format!("command {seq} failed: {e}"));
+            self.log.push(target, LogKind::Error, format!("command {seq} failed: {e}"));
         }
         self.acks.push_back(Ack { seq, result });
         while self.acks.len() > self.cfg.acks_kept {
@@ -206,6 +216,9 @@ impl Publisher {
     fn publish(&mut self) {
         let (receivers, bus) = build::receivers(&self.engine, &self.registry, self.cfg.rows_per_snapshot, &mut self.watch, &mut self.log);
         let records = self.engine.records().view();
+        let letter = |serial: &str| receivers.iter().find(|r| r.device.serial == serial).map(|r| r.letter);
+        self.narrator.emitters(&records, letter, &mut self.log);
+        self.narrator.bus(&bus, &mut self.log);
         if self.systems.0 != records.version {
             self.systems = (records.version, Arc::new(crate::decoders::systems(&records)));
         }
@@ -238,6 +251,8 @@ impl Publisher {
             channels: self.channels.1.clone(),
             workers: self.engine.worker_views(),
             worker_modes: self.engine.worker_modes(),
+            catalogue: self.catalogue.clone(),
+            band_plan: self.band_plan.clone(),
         }));
     }
 }
@@ -259,6 +274,7 @@ fn command_name(c: &Command) -> &'static str {
         Command::QueryRecords(_) => "query records",
         Command::Play { .. } => "play",
         Command::StopPlay(_) => "stop play",
+        Command::SaveIq { .. } => "save IQ",
         Command::StartWorker { .. } => "start worker",
         Command::StopWorker(_) => "stop worker",
     }
@@ -285,6 +301,7 @@ fn command_source(c: &Command) -> Option<SourceId> {
         | Command::Note { .. }
         | Command::QueryRecords(_)
         | Command::StopPlay(_)
+        | Command::SaveIq { .. }
         | Command::StopWorker(_) => None,
         Command::StartWorker { source, .. } => Some(*source),
         Command::Play { target: api::PlayTarget::Region { source, .. }, .. } => Some(*source),

@@ -7,7 +7,7 @@ use num_complex::Complex32;
 use crate::{
     AmKind, Features, Hints, NARROW_CUTOFF_HZ, OFDM_USEFUL_S, PERIOD_WINDOW_S, SyncPass, SyncResult, WEAK_DB, acars, am_evidence, blind,
     carrier, chirp, decode, features, flex, frames, gsm, longest_on_run, ofdm_label, prepare, prepare_cutoff, protocol_cutoff_hz, squelch,
-    sync_disc, sync_features, sync_pass,
+    sunfsk, sync_disc, sync_features, sync_pass, weak_pass,
 };
 
 /// The shortest window any rung looks at: 20 ms.
@@ -171,36 +171,59 @@ pub fn acars(w: &Window<'_>) -> Option<Identified> {
 /// The sync bank, for narrowband signals that aren't bare carriers (4.5–60 kHz): first through the narrow 4FSK
 /// pre-filter, then the bandwidth's own. Once a protocol is named, the channel is sliced again through the cutoff that
 /// protocol does best with, and the better of the two passes kept.
+///
+/// Channels up to 25 kHz also get the weak pass ([`crate::weak_pass`]), and the pass that decoded more frames wins. So
+/// do records narrower than 4.5 kHz, whose window is still a whole channel: on air at 800 MHz they were mostly the
+/// 2–5 kHz cores of weak P25 channels, all that rose over the detector's threshold.
 pub fn sync_bank(w: &Window<'_>) -> Option<Synced> {
-    if !(4.5e3..60e3).contains(&w.bandwidth_hz) {
+    if w.bandwidth_hz >= 60e3 {
         return None;
     }
     let (raw, fs) = (w.full, w.fs);
     let narrow = w.bandwidth_hz <= 25e3;
-    let own_cutoff = (w.bandwidth_hz * 0.5 + 500.0).clamp(4_000.0, 6_500.0);
-    let mut found: Option<(f64, SyncPass)> = None;
-    for (cutoff, d) in [
-        narrow.then(|| (NARROW_CUTOFF_HZ, sync_disc(&prepare_cutoff(raw, fs, NARROW_CUTOFF_HZ), fs))),
-        Some((own_cutoff, if raw.len() == w.raw.len() { sync_disc(&w.x, fs) } else { sync_disc(&prepare(raw, fs, w.bandwidth_hz), fs) })),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Some(p) = sync_pass(&d, fs, None) {
-            found = Some((cutoff, p));
-            break;
-        }
-    }
-    let (used, mut pass) = found?;
-    let pref = protocol_cutoff_hz(pass.best.protocol, pass.best.detail);
-    if (pref - used).abs() > 1.0 {
-        let d = sync_disc(&prepare_cutoff(raw, fs, pref), fs);
-        if let Some(again) = sync_pass(&d, fs, Some(&pass.best))
-            && again.better_than(&pass)
+    let mut hard: Option<SyncPass> = None;
+    if w.bandwidth_hz >= 4.5e3 {
+        let own_cutoff = (w.bandwidth_hz * 0.5 + 500.0).clamp(4_000.0, 6_500.0);
+        let mut found: Option<(f64, SyncPass)> = None;
+        for (cutoff, d) in [
+            narrow.then(|| (NARROW_CUTOFF_HZ, sync_disc(&prepare_cutoff(raw, fs, NARROW_CUTOFF_HZ), fs))),
+            Some((
+                own_cutoff,
+                if raw.len() == w.raw.len() { sync_disc(&w.x, fs) } else { sync_disc(&prepare(raw, fs, w.bandwidth_hz), fs) },
+            )),
+        ]
+        .into_iter()
+        .flatten()
         {
-            pass = again;
+            if let Some(p) = sync_pass(&d, fs, None) {
+                found = Some((cutoff, p));
+                break;
+            }
+        }
+        if let Some((used, mut pass)) = found {
+            let pref = protocol_cutoff_hz(pass.best.protocol, pass.best.detail);
+            if (pref - used).abs() > 1.0 {
+                let d = sync_disc(&prepare_cutoff(raw, fs, pref), fs);
+                if let Some(again) = sync_pass(&d, fs, Some(&pass.best))
+                    && again.better_than(&pass)
+                {
+                    pass = again;
+                }
+            }
+            hard = Some(pass);
         }
     }
+    let weak = if narrow { weak_pass(raw, fs) } else { None };
+    let pass = match (hard, weak) {
+        (Some(h), Some(w)) => {
+            if w.better_than(&h) {
+                w
+            } else {
+                h
+            }
+        }
+        (h, w) => h.or(w)?,
+    };
     let mut f = w.features.clone();
     sync_features(&mut f, &pass.frames, &pass.best);
     let fields = (pass.fields.tried > 0).then_some(pass.fields);
@@ -241,6 +264,39 @@ pub fn gsm(w: &Window<'_>) -> Option<Identified> {
     })
 }
 
+/// 802.15.4g SUN FSK frames (Wi-SUN smart meters at 902–928 MHz): preamble and SFD found (see [`sunfsk`]). 60–600 kHz
+/// windows only (the rates' occupied bands are about 75–450 kHz).
+pub fn sun_fsk(w: &Window<'_>) -> Option<Identified> {
+    if !(60e3..600e3).contains(&w.bandwidth_hz) {
+        return None;
+    }
+    let s = sunfsk::detect(w.full, w.fs)?;
+    let mut f = w.features.clone();
+    f.symbol_rate = Some(s.rate);
+    f.symbol_rate_raw = Some(s.rate);
+    f.fsk_levels = 2;
+    let mut kinds = Vec::new();
+    if s.coded > 0 {
+        kinds.push(("coded frame".to_string(), s.coded));
+    }
+    if s.uncoded > 0 {
+        kinds.push(("uncoded frame".to_string(), s.uncoded));
+    }
+    Some(Identified {
+        protocol: Some("802.15.4g"),
+        label: s.label(),
+        confidence: 0.95,
+        fields: Some(decode::Fields {
+            kinds,
+            decoded: s.frames(),
+            tried: s.frames(),
+            activity: Some(decode::Activity::Data),
+            ..Default::default()
+        }),
+        features: f,
+    })
+}
+
 /// Sub-audible squelch signalling identifies an analog FM transmitter (a DCS code or CTCSS tone stays with a repeater
 /// for years), and is what an idle repeater's carrier mostly carries. The decoder (a 23-bit word repeating, passing its
 /// Golay check) passes no data mode; DCS itself reads as 2FSK or 4FSK to the histogram. Up to 30 kHz, steady envelope.
@@ -258,17 +314,25 @@ pub fn squelch(w: &Window<'_>) -> Option<Identified> {
     })
 }
 
+/// A narrow signal is a carrier only with a steadier envelope than this: noise's CV is about 0.52.
+pub const CARRIER_MAX_CV: f32 = 0.42;
+
 /// The modulation as the signal's shape describes it (FM broadcast by its pilot, OFDM, FSK levels and rate, PSK, AM,
 /// OOK, bursts), or "Unknown". It describes noise too: a caller gates it on [`Window::weak`].
 pub fn modulation(w: &Window<'_>) -> Described {
     let (raw, x, fs, f, bw) = (w.raw, &w.x[..], w.fs, &w.features, w.bandwidth_hz);
-    // A broadcast station's pilot and RDS subcarrier are as decisive as a sync word. The detector often cuts a station
+    // A broadcast station's pilot or RDS subcarrier is as decisive as a sync word. The detector often cuts a station
     // into fragments of 70–150 kHz (its centre, a sideband), whose discriminator still holds the pilot but whose squared
     // derivative also holds lines the FSK rules took for "2FSK 2400 Bd"; so this goes first, for anything wide enough to
     // carry a 19 kHz subcarrier.
-    let pilot = (bw >= 30e3).then(|| blind::fm_pilot(&w.disc, fs)).flatten();
-    let (label, confidence) = if let Some(p) = pilot {
-        (if p.rds { "FM broadcast (stereo, RDS)".to_string() } else { "FM broadcast (stereo)".to_string() }, 0.9)
+    let station = (bw >= 30e3).then(|| blind::fm_broadcast(&w.disc, fs)).flatten();
+    let (label, confidence) = if let Some(p) = station {
+        let label = match (p.pilot_db.is_some(), p.rds) {
+            (true, true) => "FM broadcast (stereo, RDS)",
+            (true, false) => "FM broadcast (stereo)",
+            _ => "FM broadcast (mono, RDS)",
+        };
+        (label.to_string(), 0.9)
     } else if bw > 150e3 {
         if let Some(o) = blind::ofdm(x, fs, OFDM_USEFUL_S.0, OFDM_USEFUL_S.1) {
             (ofdm_label(&o), 0.7)
@@ -284,8 +348,13 @@ pub fn modulation(w: &Window<'_>) -> Described {
         // `Hints::am_band`).
         if w.am_band && carrier::coherent_am(raw, fs).is_some_and(|m| m.is_am()) {
             ("AM".to_string(), 0.6)
-        } else {
+        } else if f.envelope_cv < CARRIER_MAX_CV {
             ("Carrier".to_string(), 0.6)
+        } else {
+            // Noise's envelope (CV ≈ 0.52), not a carrier's: on air (2026-11-10) nearly every "Carrier" was a 1–4 kHz
+            // record at 11–12 dB with CV ≥ 0.42 and 3–5 kHz of "deviation", the core of a weak 4800 Bd channel at
+            // 800 MHz or a distant FM station's peak; the real carriers measured CV < 0.3.
+            ("Unknown".to_string(), 0.0)
         }
     } else if f.fsk_levels <= 2 && f.tone_hz.is_some() && f.envelope_cv < 0.3 {
         // One pure tone carries the frequency: analog FM with a steady tone (an idle repeater, a test tone). Its two-peak
